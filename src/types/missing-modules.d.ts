@@ -1,0 +1,9 @@
+declare module '../daemon/workerRegistry.js';
+declare module '../daemon/main.js';
+declare module '../cli/bg.js';
+declare module '../cli/handlers/templateJobs.js';
+declare module '../environment-runner/main.js';
+declare module '../self-hosted-runner/main.js';
+declare module '../main.js';
+declare module '../utils/config.js';
+declare module '../utils/sinks.js';
