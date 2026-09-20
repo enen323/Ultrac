@@ -293,7 +293,7 @@ async function main(): Promise<void> {
   profileCheckpoint('cli_before_main_import');
   const {
     main: cliMain
-  } = await import('../main.js');
+  } = await import('../main.tsx');
   profileCheckpoint('cli_after_main_import');
   await cliMain();
   profileCheckpoint('cli_after_main_complete');
