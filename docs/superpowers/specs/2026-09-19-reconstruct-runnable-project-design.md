@@ -4,6 +4,37 @@
 **目标：** 从原始 TypeScript 源码转储重建可运行的 Claude Code CLI 工具
 **运行时：** Bun
 **策略：** 核心路径完整还原，边缘功能功能桩标记
+**最后修订：** 2026-09-21（§9.1、§9.2、新增 §9.5）
+
+---
+
+## 0. 文档维护约定
+
+本 spec 与 `docs/superpowers/plans/` 下的计划是**活的文档**，不是写完就冻结的。
+
+**规则：执行中一旦发现文档写的和实际不符，必须当场修订对应文档，然后继续。** 不要只在对话里提一句，不要留到"以后再说"。
+
+需要修订的典型情形：
+- 文档列的依赖/文件/模块清单与实际不符（漏项、多项、状态标错）
+- 文档声称某方案可行，实测不可行（或反之）
+- 文档里的路径、包名、版本号过期
+- 实施结论推翻了文档里的某个判断
+
+**修订方式：**
+1. 就地改文档，不要新开一份"勘误"文件
+2. 在被改处保留一行 `> **YYYY-MM-DD 修订：** <原判断> → <新判断>。<原因>`，说明改了什么、为什么改——后续 session 需要知道这个结论是怎么来的
+3. 修订完成后才继续实施
+
+**已按此规则修订的记录：**
+| 日期 | 位置 | 修订内容 |
+|------|------|----------|
+| 2026-09-20 | §2.3 / §6.1 | `react/compiler-runtime` 从「必需依赖」和「可选依赖」中移除——它不是可安装包 |
+| 2026-09-20 | §9.1 | 缺失模块清单 9 条 → 实际 6 条（Task 7 移除 3 条） |
+| 2026-09-20 | §9.2 | 外部依赖列表 26 个 → 62 个，并标注内部包 |
+| 2026-09-20 | §9.4 | 新增「无法通过 npm 获取的依赖」章节 |
+| 2026-09-21 | §9.1 | 6 条声明对应的桩文件已由 Task 7 创建（`src/daemon/main.ts` 等），「处理计划」改为按 stubs-registry 还原 |
+| 2026-09-21 | §9.2 | 补录 `@anthropic-ai/foundry-sdk`（grep 提取漏项）；确认 `commander` 无源码引用，从依赖集移除 |
+| 2026-09-21 | §9.5（新增） | 记录构建期缺失的 26 个本地 specifier / 23 个文件及建桩处理方式 |
 
 ---
 
@@ -88,7 +119,8 @@ src/entrypoints/cli.tsx  (入口，fast-path 分发)
 - `commander` / `@commander-js/extra-typings` — CLI 参数解析
 - `strip-ansi` — ANSI 转义处理
 - `figures` — 终端符号
-- `react/compiler-runtime` — React compiler
+
+**关于 `react/compiler-runtime`：** 源码中有 `import ... from 'react/compiler-runtime'`，但 `react@18.3.12` 的 `package.json` `exports` 字段**没有** `./compiler-runtime` 子路径，因此该导入必然解析失败。这不是可安装的包，不能通过 `bun add react/compiler-runtime` 解决。需要写类型声明桩 + 本地 shim，见 §9.4。
 
 **Phase 5+ 补全（当前可暂不安装）：**
 - `@opentelemetry/api` — 遥测
@@ -530,7 +562,7 @@ bun run src/entrypoints/cli.tsx  # 输入问题 → 流式输出 AI 回答
 ├── eventsource-parser
 ├── sudo-prompt
 ├── clipboardy
-└── react/compiler-runtime
+└──（原列于此处的 `react/compiler-runtime` 不是可安装包，已移至 §9.4）
 ```
 
 ### 6.2 内部依赖（核心路径）
@@ -610,7 +642,7 @@ src/entrypoints/cli.tsx
 
 ### 9.1 缺失模块清单（`missing-modules.d.ts`）
 
-当前声明但未实现的模块：
+> **2026-09-20 更新：** 本节已按 Phase 1 Task 7（commit `d4022c2`）的实际结果修订。原清单列了 9 条，其中 `../main.js`、`../utils/config.js`、`../utils/sinks.js` 三条已被移除——`../main.js` 通过把 [cli.tsx](../../../src/entrypoints/cli.tsx) 的 import 改成 `'../main.tsx'` 解决，另两条经核对源码后确认并非真实缺失。**当前实际内容为 6 条：**
 
 ```ts
 declare module '../daemon/workerRegistry.js';
@@ -619,61 +651,97 @@ declare module '../cli/bg.js';
 declare module '../cli/handlers/templateJobs.js';
 declare module '../environment-runner/main.js';
 declare module '../self-hosted-runner/main.js';
-declare module '../main.js';  // 应该是 main.tsx
-declare module '../utils/config.js';
-declare module '../utils/sinks.js';
 ```
 
 **处理计划：**
-- `../main.js` → 改为 `../main.tsx`（Phase 1）
-- 其余模块 → 逐步实现或删除声明
+- `../main.js` → 已改为 `../main.tsx`（Phase 1 完成）
+- 其余 6 条 → 对应入口的桩文件已由 Phase 1 Task 7 创建（`src/daemon/main.ts`、`src/daemon/workerRegistry.ts`、`src/cli/bg.ts`、`src/cli/handlers/templateJobs.ts`、`src/environment-runner/main.ts`、`src/self-hosted-runner/main.ts`），声明保留给 `tsc` 用；真实逻辑按 stubs-registry Phase 6 还原
 
 ### 9.2 外部依赖完整列表
 
-从源码提取的所有外部 import：
+> **2026-09-20 修订：** 原列表只提取了 26 个包，漏掉了绝大部分真实依赖。下表现已按 `grep` 全量 `src/` 后重新提取，共 62 个包。子路径导入（`lodash-es/xxx.js`、`@anthropic-ai/sdk/resources/xxx.mjs`）已折叠到顶层包名——它们不是独立依赖。
+
+**标记含义：** ✅ 公开 npm 可安装 ｜ ⚠️ Anthropic 内部包，公开 registry 上不存在（见 §9.4）
+
+#### Anthropic 作用域
+
+| 包 | 状态 |
+|---|---|
+| `@anthropic-ai/sdk` | ✅ |
+| `@anthropic-ai/claude-agent-sdk` | ✅（npm 最新 0.3.278） |
+| `@anthropic-ai/mcpb` | ✅（npm 最新 2.1.2） |
+| `@anthropic-ai/sandbox-runtime` | ✅（npm 最新 0.0.77） |
+| `@anthropic-ai/foundry-sdk` | ✅（npm 最新 0.4.8） |
+| `@ant/computer-use-mcp`（含子路径 `/types`、`/sentinelApps`） | ⚠️ 内部 |
+| `@ant/computer-use-swift` | ⚠️ 内部 |
+| `@ant/computer-use-input` | ⚠️ 内部 |
+| `@ant/claude-for-chrome-mcp` | ⚠️ 内部 |
+
+> ⚠️ **容易踩的坑：** `@anthropic-ai/claude-agent-sdk`、`@anthropic-ai/mcpb`、`@anthropic-ai/sandbox-runtime` 这三个是**公开包**。早前曾被误判为内部包，导致白造了一遍 stub。它们构建报错只是因为 `package.json` 没声明，正常 `bun add` 即可。
+
+> **2026-09-21 修订：** 补录 `@anthropic-ai/foundry-sdk`（`src/services/api/client.ts:192` 动态 import `AnthropicFoundry`，`CLAUDE_CODE_USE_FOUNDRY` 门控）——原 grep 提取漏项。同时确认 `commander` 无任何源码引用（原 10 依赖中唯一未被引用的），从依赖集移除；`@commander-js/extra-typings` 保留。
+
+#### 其余作用域包
+
+| 包 | 状态 |
+|---|---|
+| `@alcalzone/ansi-tokenize` | ✅ |
+| `@aws-sdk/client-bedrock-runtime` | ✅ |
+| `@commander-js/extra-typings` | ✅ |
+| `@growthbook/growthbook` | ✅ |
+| `@modelcontextprotocol/sdk` | ✅ |
+| `@opentelemetry/api` / `api-logs` / `core` / `resources` / `sdk-logs` / `sdk-metrics` / `sdk-trace-base` / `semantic-conventions` | ✅ |
+
+#### 无作用域包
 
 ```
-@anthropic-ai/claude-agent-sdk
-@anthropic-ai/mcpb
-@anthropic-ai/sandbox-runtime
-@anthropic-ai/sdk
-@anthropic-ai/sdk/error
-@anthropic-ai/sdk/resources
-@anthropic-ai/sdk/resources/beta/messages.js
-@anthropic-ai/sdk/resources/beta/messages/messages.mjs
-@anthropic-ai/sdk/resources/index.mjs
-@anthropic-ai/sdk/resources/messages.js
-@anthropic-ai/sdk/resources/messages.mjs
-@anthropic-ai/sdk/resources/messages/messages.mjs
-@anthropic-ai/sdk/streaming.mjs
-chalk
-ink
-lodash-es
-lodash-es/capitalize.js
-lodash-es/cloneDeep.js
-lodash-es/isEqual.js
-lodash-es/isObject.js
-lodash-es/isPlainObject.js
-lodash-es/last.js
-lodash-es/mapValues.js
-lodash-es/memoize.js
-lodash-es/mergeWith.js
-lodash-es/noop.js
-lodash-es/omit.js
-lodash-es/partition.js
-lodash-es/pickBy.js
-lodash-es/reject.js
-lodash-es/sample.js
-lodash-es/setWith.js
-lodash-es/sumBy.js
-lodash-es/throttle.js
-lodash-es/uniqBy.js
-lodash-es/zipObject.js
-react
-react-reconciler
-react-reconciler/constants.js
-strip-ansi
+ajv            asciichart     auto-bind      axios
+bidi-js        chalk          chokidar       cli-boxes
+code-excerpt   color-diff-napi diff          emoji-regex
+env-paths      execa          figures        fuse.js
+get-east-asian-width           google-auth-library
+highlight.js   https-proxy-agent              ignore
+indent-string  ink            jsonc-parser   lodash-es
+lru-cache      marked         picomatch      p-map
+proper-lockfile               qrcode         react
+react-reconciler               semver         shell-quote
+stack-utils    strip-ansi     supports-hyperlinks
+tree-kill      type-fest      undici         usehooks-ts
+vscode-jsonrpc vscode-languageserver-protocol
+vscode-languageserver-types    wrap-ansi
+ws             xss            zod
 ```
+
+#### 开发依赖
+
+`@types/react`、`@types/lodash-es`、`typescript`
+
+#### Node 内置模块（无需安装）
+
+`async_hooks`、`buffer`、`child_process`、`crypto`、`dns`、`events`、`fs`、`http`、`https`、`net`、`os`、`path`、`perf_hooks`、`process`、`readline`、`signal-exit`、`stream`、`tls`、`tty`、`url`、`util`、`v8`、`zlib`
+
+### 9.4 无法通过 npm 获取的依赖
+
+构建时会遇到两类解析失败，处理方式不同：
+
+#### A. Anthropic 内部包（4 个，`@ant/*` 作用域）
+
+`npm view <pkg> version` 返回 NOT-FOUND，确认不存在于公开 registry。**不要尝试 `bun add`，也不要手写 node_modules stub。**
+
+| 包 | 源码引用点 |
+|---|---|
+| `@ant/computer-use-mcp` | `src/utils/computerUse/{executor,gates,hostAdapter,inputLoader,mcpServer,setup,wrapper}.ts`、`src/components/permissions/ComputerUseApproval/ComputerUseApproval.tsx` |
+| `@ant/claude-for-chrome-mcp` | `src/skills/bundled/claudeInChrome.ts`、`src/utils/claudeInChrome/{mcpServer,setup}.ts` |
+| `@ant/computer-use-swift` | `src/utils/computerUse/swiftLoader.ts` |
+| `@ant/computer-use-input` | `src/utils/computerUse/inputLoader.ts` |
+
+**处理方式：** 写 `declare module` 类型声明 + 本地运行时 shim，与 `missing-modules.d.ts` 同一套机制。这四个包集中在 computer-use / browser 控制功能，属于 Anthropic 内部基础设施。
+
+#### B. `react/compiler-runtime`
+
+源码 `import ... from 'react/compiler-runtime'`。`react@18.3.12` 的 `package.json` `exports` 没有 `./compiler-runtime` 子路径，所以**无论装什么版本都解析不到**。这不是内部包，是 React 包自身没导出该子路径。
+
+**处理方式：** 类型声明 + 本地 shim 文件（提供 `c`/`useMemoCache` 等 React Compiler runtime 导出的空实现）。
 
 ### 9.3 Bun API 使用清单
 
@@ -692,6 +760,47 @@ Bun.TOML
 **处理计划：**
 - Phase 1：提供类型声明（`src/types/bun-api.d.ts`）
 - Phase 3：提供 polyfill 层（Node.js 兼容）
+
+---
+
+### 9.5 构建期缺失的本地源文件（26 个 specifier / 23 个文件）
+
+> **2026-09-21 新增：** Phase 1 Task 8d 实测 `bun build` 报 90 条 error，其中 26 个唯一 specifier 指向**磁盘上不存在的本地文件**（另 5 个是外部包，见 §9.2 / §9.4）。这些文件在泄露源码解压里本来就不存在——同级仓库 `claude-code/` 的 1911 个源文件同样没有它们，公开 npm 包 `@anthropic-ai/claude-code` 只有打包产物（`cli.js`）没有 TS 源码——**无法还原，只能建桩**。
+
+**缺失清单（按引用点归并后 23 个文件）：**
+
+| 目标文件 | 引用点 |
+|---|---|
+| `src/types/connectorText.ts` | `src/utils/messages.ts:40`、`src/services/api/claude.ts:44`、`src/services/api/logging.ts:17`（三种相对/别名写法） |
+| `src/ink/global.d.ts` | `src/ink/components/Box.tsx:2`（副作用 import） |
+| `src/services/compact/snipCompact.ts` | `src/utils/attachments.ts:3973` |
+| `src/tools/TungstenTool/TungstenLiveMonitor.ts` | `src/screens/REPL.tsx:270` |
+| `src/tools/WorkflowTool/constants.ts` | `src/constants/tools.ts:29` |
+| `src/assistant/AssistantSessionChooser.tsx` | `src/dialogLaunchers.tsx:63` |
+| `src/services/compact/cachedMicrocompact.ts` | `src/services/compact/microCompact.ts:66` |
+| `src/commands/agents-platform/index.ts` | `src/commands.ts:50` |
+| `src/commands/assistant/assistant.ts` | `src/dialogLaunchers.tsx:77` |
+| `src/components/agents/SnapshotUpdateDialog.tsx` | `src/dialogLaunchers.tsx:36` |
+| `src/entrypoints/sdk/coreTypes.generated.ts` | `src/entrypoints/sdk/coreTypes.ts:19` |
+| `src/ink/devtools.ts` | `src/ink/reconciler.ts:36` |
+| `src/utils/protectedNamespace.ts` | `src/utils/envUtils.ts:142`（require + typeof import 断言） |
+| `src/entrypoints/sdk/runtimeTypes.ts` | `src/entrypoints/agentSdkTypes.ts:26` |
+| `src/entrypoints/sdk/toolTypes.ts` | `src/entrypoints/agentSdkTypes.ts:31` |
+| `src/tools/REPLTool/REPLTool.ts` | `src/tools.ts:18` |
+| `src/tools/SuggestBackgroundPRTool/SuggestBackgroundPRTool.ts` | `src/tools.ts:22` |
+| `src/tools/TungstenTool/TungstenTool.ts` | `src/tools.ts:60`、`src/commands/clear/caches.ts:96` |
+| `src/tools/VerifyPlanExecutionTool/VerifyPlanExecutionTool.ts` | `src/tools.ts:93` |
+| `src/utils/filePersistence/types.ts` | `src/utils/filePersistence/filePersistence.ts:37` |
+| `src/skills/bundled/verify/SKILL.md` | `src/skills/bundled/verifyContent.ts:6` |
+| `src/skills/bundled/verify/examples/cli.md` | `src/skills/bundled/verifyContent.ts:4` |
+| `src/skills/bundled/verify/examples/server.md` | `src/skills/bundled/verifyContent.ts:5` |
+
+**处理方式：** 全部建桩（Phase 1 Task 8c），遵循「核心路径完整还原，边缘功能功能桩标记」策略——清单内模块全部是边缘/生成类功能。类型精确度留给 Phase 2（`tsc --noEmit`），Phase 1 只要求 `bun build` 通过。
+
+**已实测的 Bun 行为（影响建桩方式）：**
+- bun build 遵循 `tsconfig.json` 的 `paths`（含 `.js` → `.ts`/`.tsx` 替换），`import` 和 `require` 两种写法都能解析到 `.ts` 桩文件
+- bun build 默认把 `.md` 当 text 内联（无需配置 loader），`verify/*.md` 给最小合法 markdown 即可
+- bun build 容忍 `.d.ts` 的副作用 import，`src/ink/global.d.ts` 给 `export {}` 即可
 
 ---
 

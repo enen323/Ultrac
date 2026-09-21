@@ -2,7 +2,7 @@
 
 **用途：** 核心路径完成后，按此清单逐个还原功能桩。
 **创建时间：** 2026-09-19
-**最后更新：** 2026-09-19
+**最后更新：** 2026-09-21
 
 ---
 
@@ -154,6 +154,33 @@
 | 68 | Native Installer | `src/utils/nativeInstaller/` | `// TODO: Phase 6` | 原生安装器正常 | 无 |
 | 69 | Update Checker | `src/cli/update.ts` | `// TODO: Phase 6` | 自动更新检查正常 | 无 |
 
+**还原顺序：** 68 → 69
+
+### 6.11 Phase 1 构建桩（Task 8b / 8c 新增，2026-09-21）
+
+以下条目不是功能还原桩，而是 **Phase 1 为让 `bun build` 通过而建的构建桩**——源码引用了这些模块，但泄露解压里文件不存在（详见设计文档 §9.4、§9.5）。真实实现需要 Anthropic 内部包或未泄露的源码，按 Phase 6 标准还原。
+
+| # | 模块 | 文件 | 标记注释 | 还原标准 | 依赖 |
+|---|------|------|----------|----------|------|
+| 70 | Tungsten 工具 | `src/tools/TungstenTool/TungstenTool.ts`、`src/tools/TungstenTool/TungstenLiveMonitor.ts` | `// TODO: Phase 6` | Tungsten 工具正常注册执行 | 无 |
+| 71 | REPL 工具（ant-only） | `src/tools/REPLTool/REPLTool.ts` | `// TODO: Phase 6` | `USER_TYPE=ant` 下工具可用 | 无 |
+| 72 | SuggestBackgroundPR 工具（ant-only） | `src/tools/SuggestBackgroundPRTool/SuggestBackgroundPRTool.ts` | `// TODO: Phase 6` | `USER_TYPE=ant` 下工具可用 | 无 |
+| 73 | VerifyPlanExecution 工具 | `src/tools/VerifyPlanExecutionTool/VerifyPlanExecutionTool.ts` | `// TODO: Phase 6` | `CLAUDE_CODE_VERIFY_PLAN=true` 下工具可用 | 无 |
+| 74 | WorkflowTool 常量 | `src/tools/WorkflowTool/constants.ts` | `// TODO: Phase 6` | 常量与 WorkflowTool 实现一致 | 无 |
+| 75 | Assistant 会话选择器 | `src/assistant/AssistantSessionChooser.tsx` | `// TODO: Phase 6` | 对话框正常渲染 | 48 |
+| 76 | Assistant 命令 | `src/commands/assistant/assistant.ts` | `// TODO: Phase 6` | assistant 命令正常 | 48 |
+| 77 | Agents-platform 命令 | `src/commands/agents-platform/index.ts` | `// TODO: Phase 6` | agents-platform 命令正常 | 无 |
+| 78 | SnapshotUpdateDialog | `src/components/agents/SnapshotUpdateDialog.tsx` | `// TODO: Phase 6` | 对话框正常渲染 | 无 |
+| 79 | snipCompact / cachedMicrocompact | `src/services/compact/snipCompact.ts`、`src/services/compact/cachedMicrocompact.ts` | `// TODO: Phase 6` | 压缩功能正常 | 65 |
+| 80 | connectorText 类型 | `src/types/connectorText.ts` | `// TODO: Phase 6` | 类型与 API 一致 | 无 |
+| 81 | SDK 生成类型 | `src/entrypoints/sdk/coreTypes.generated.ts`、`runtimeTypes.ts`、`toolTypes.ts` | `// TODO: Phase 6` | 类型与 SDK 一致 | 无 |
+| 82 | filePersistence 类型 | `src/utils/filePersistence/types.ts` | `// TODO: Phase 6` | 类型与实现一致 | 无 |
+| 83 | ink devtools / global 声明 | `src/ink/devtools.ts`、`src/ink/global.d.ts` | `// TODO: Phase 6` | devtools 钩子正常 | 无 |
+| 84 | protectedNamespace（ant-only） | `src/utils/protectedNamespace.ts` | `// TODO: Phase 6` | `checkProtectedNamespace()` 正常 | 无 |
+| 85 | verify skill 内容 | `src/skills/bundled/verify/SKILL.md`、`examples/cli.md`、`examples/server.md` | `// TODO: Phase 6` | skill 内容完整 | 21 |
+| 86 | `@ant/*` 内部包 shim | `src/types/shims/` 下 4 个 shim（computer-use-mcp / computer-use-swift / computer-use-input / claude-for-chrome-mcp） | `// TODO: Phase 6` | 内部包可获取后替换 | 43, 44 |
+| 87 | `react/compiler-runtime` shim | `src/types/shims/` 下 shim | `// TODO: Phase 6` | React Compiler 运行时正常 | 无 |
+
 ---
 
 ## 快速索引
@@ -170,7 +197,7 @@
 - #27 WebSearchTool
 - #61 Git 操作
 
-**Phase 6 还原（57 个）：**
+**Phase 6 还原（75 个）：**
 - 遥测：1-4
 - 网络：7, 9-11
 - 远程设置：12, 14
@@ -179,7 +206,7 @@
 - 工具：#24-25, #30-32
 - Daemon：33-35
 - Bridge：36-41
-- 其他：42-50, 51-69
+- 其他：42-50, 51-87
 
 ---
 
