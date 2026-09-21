@@ -18,6 +18,7 @@
 - `bun:bundle` `feature()` 桩实现：Phase 1 所有门控返回 `true`
 - `src/*` 路径别名映射到 `./src/*`
 - 所有桩导出均为 `export async function`，空操作或返回空值
+  > **2026-09-21 修订（Task 8d Ruling）：** 该约束有一个已记录例外——`src/services/contextCollapse/index.js` 的 `getStats`/`subscribe`/`isContextCollapseEnabled` 保持同步 `export function`。原因：其调用方（`ContextVisualization.tsx`、`TokenWarning.tsx`）同步消费返回值（直接读 `.collapsedSpans` 等字段），改 async 会把「桩返回零值」变成「调用方拿到未 await 的 Promise、读出 undefined」——更坏的运行时行为。约束意图（桩惰性）由零值返回保留。Phase 6 还原该模块时连同本约束一起复审。
 - 每个任务完成前必须提交 commit
 - **`@ant/*` 作用域的 4 个包（`computer-use-mcp`、`computer-use-swift`、`computer-use-input`、`claude-for-chrome-mcp`）是 Anthropic 内部包，公开 npm registry 上不存在。禁止 `bun add`，禁止在 `node_modules/` 手写 stub。** 处理方式见 spec §9.4-A。
 - **`react/compiler-runtime` 不是可安装包**（`react@18.3.12` 的 `exports` 无此子路径），需要本地 shim。见 spec §9.4-B。
@@ -639,14 +640,14 @@ git commit -m "feat: 为构建期缺失的 26 个本地模块建桩"
 
 **步骤：**
 
-- [ ] 步骤 1：迭代修复
+- [x] 步骤 1：迭代修复
 
-- [ ] 步骤 2：确认构建通过
+- [x] 步骤 2：确认构建通过
 
 执行：`bun build src/entrypoints/cli.tsx --target=bun --outdir=dist`
 期望：退出码 0，生成 `dist/cli.js`。
 
-- [ ] 步骤 3：提交成功的构建
+- [x] 步骤 3：提交成功的构建
 
 ```bash
 git add package.json bun.lock tsconfig.json src/ docs/
@@ -664,7 +665,7 @@ git commit -m "build: bun build src/entrypoints/cli.tsx 构建成功"
 - [x] Task 5：`bun:bundle` `feature()` 类型 + 运行时桩
 - [x] Task 6：`../main.js` → `../main.tsx` import 修复
 - [x] Task 7：6 个桩文件已创建，`missing-modules.d.ts` 已清理
-- [ ] Task 8a：依赖集补齐（66 个公开包 + `@anthropic-ai/foundry-sdk`，移除未引用的 `commander`）
-- [ ] Task 8b：5 个不可安装外部模块（4 个 `@ant/*` + `react/compiler-runtime`）的声明 + shim
-- [ ] Task 8c：23 个构建期缺失本地模块的桩文件（覆盖 26 个 specifier）
-- [ ] Task 8d：`bun build src/entrypoints/cli.tsx` 成功
+- [x] Task 8a：依赖集补齐（66 个公开包 + `@anthropic-ai/foundry-sdk`，移除未引用的 `commander`）
+- [x] Task 8b：5 个不可安装外部模块（4 个 `@ant/*` + `react/compiler-runtime`）的声明 + shim
+- [x] Task 8c：23 个构建期缺失本地模块的桩文件（覆盖 26 个 specifier）
+- [x] Task 8d：`bun build src/entrypoints/cli.tsx` 成功
