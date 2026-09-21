@@ -27,7 +27,7 @@
 
 ### Task 1：创建 `package.json`
 
-> **2026-09-20 修订：** 原步骤 1 的 10 个依赖经实测**不足以让 `bun build` 成功**——真实外部依赖共 62 个（见 spec §9.2）。下方保留原始内容作为历史记录，实际依赖集以「修订后的依赖清单」为准。
+> **2026-09-20 修订：** 原步骤 1 的 10 个依赖经实测**不足以让 `bun build` 成功**——真实外部依赖见下方「修订后的依赖清单」（2026-09-21 逐包清点为 **66 个**，此前写作 62 个是当时的分组计数误差）。下方保留原始内容作为历史记录，实际依赖集以「修订后的依赖清单」为准。
 
 > **2026-09-21 修订：** 依赖集在 62 个基础上微调两处（Task 8a 执行）：`commander` **移除**（全仓库 grep 无 `from 'commander'` / `require('commander')` 引用，是原 10 个依赖里唯一未被源码引用的包）；`@anthropic-ai/foundry-sdk` **加入**（`src/services/api/client.ts:192` 动态 import `AnthropicFoundry`，spec §9.2 的 grep 提取漏录，已同步补录）。
 
@@ -90,7 +90,7 @@ git commit -m "feat: 添加 package.json 并声明核心依赖"
 
 #### 修订后的依赖清单
 
-**需要 `bun add` 的公开包（62 个外部依赖，排除 4 个内部 `@ant/*` 后的可安装部分）：**
+**需要 `bun add` 的公开包（外部依赖共 66 个，排除 4 个内部 `@ant/*` 后的可安装部分；2026-09-21 逐包清点确认，此前「62 个」为分组计数误差）：**
 
 ```
 @alcalzone/ansi-tokenize          @anthropic-ai/claude-agent-sdk
@@ -437,7 +437,7 @@ git commit -m "feat: 为 cli.tsx 引用的缺失模块添加桩文件"
 
 ---
 
-### Task 8a：补全依赖集（62 个公开包 + `@anthropic-ai/foundry-sdk`）
+### Task 8a：补全依赖集（66 个公开包 + `@anthropic-ai/foundry-sdk`）
 
 > **2026-09-21 修订：** 原 Task 8 只有「跑构建、见错修错」四步，但 2026-09-21 实测 `bun build` 报 90 条 error、31 个唯一无法解析的模块，实际工作量拆成 Task 8a-8d 四个子任务顺序执行。原 Task 8 的验证目标（`bun build` 退出码 0、生成 `dist/cli.js`）不变，由 Task 8d 收口。
 
@@ -449,12 +449,12 @@ git commit -m "feat: 为 cli.tsx 引用的缺失模块添加桩文件"
 - 输入：Task 1 的「修订后的依赖清单」（62 个公开包）+ `@anthropic-ai/foundry-sdk`
 - 输出：`bun install` 成功，`node_modules/` 含全部公开依赖
 
-**背景：** Task 1 提交的 `package.json` 只含原 10 个依赖。实测 `bun build` 需要 62 个公开依赖（spec §9.2）。本任务把依赖集补齐。
+**背景：** Task 1 提交的 `package.json` 只含原 10 个依赖。实测 `bun build` 需要 66 个公开依赖（spec §9.2）。本任务把依赖集补齐。
 
 **规则：**
-- dependencies 恰好为修订后的 62 个包 + `@anthropic-ai/foundry-sdk`（共 63 个）
+- dependencies 恰好为修订后的 66 个包 + `@anthropic-ai/foundry-sdk`（共 67 个）
 - 原 10 个依赖中保留的 9 个（去掉 `commander`）沿用 `package.json` 中已有的版本范围（`^0.27.0` 等），不要改动
-- 新增的 54 个包不写死版本，由 `bun add` 解析最新版后落入 `package.json`
+- 新增的 58 个包不写死版本，由 `bun add` 解析最新版后落入 `package.json`
 - `react` 保持 `^18.3.1`、`ink` 保持 `^5.0.0`、`react-reconciler` 保持 `^0.29.2`——这三个的兼容性不能动
 - devDependencies 保持 `@types/react`、`@types/lodash-es`、`typescript` 不变
 - **禁止** `bun add` 4 个 `@ant/*` 内部包（`@ant/computer-use-mcp`、`@ant/computer-use-swift`、`@ant/computer-use-input`、`@ant/claude-for-chrome-mcp`）
@@ -664,7 +664,7 @@ git commit -m "build: bun build src/entrypoints/cli.tsx 构建成功"
 - [x] Task 5：`bun:bundle` `feature()` 类型 + 运行时桩
 - [x] Task 6：`../main.js` → `../main.tsx` import 修复
 - [x] Task 7：6 个桩文件已创建，`missing-modules.d.ts` 已清理
-- [ ] Task 8a：依赖集补齐（62 个公开包 + `@anthropic-ai/foundry-sdk`，移除未引用的 `commander`）
+- [ ] Task 8a：依赖集补齐（66 个公开包 + `@anthropic-ai/foundry-sdk`，移除未引用的 `commander`）
 - [ ] Task 8b：5 个不可安装外部模块（4 个 `@ant/*` + `react/compiler-runtime`）的声明 + shim
 - [ ] Task 8c：23 个构建期缺失本地模块的桩文件（覆盖 26 个 specifier）
 - [ ] Task 8d：`bun build src/entrypoints/cli.tsx` 成功
