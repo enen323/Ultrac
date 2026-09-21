@@ -180,6 +180,8 @@
 | 85 | verify skill 内容 | `src/skills/bundled/verify/SKILL.md`、`examples/cli.md`、`examples/server.md` | `// TODO: Phase 6` | skill 内容完整 | 21 |
 | 86 | `@ant/*` 内部包 shim | `src/types/shims/` 下 4 个 shim（computer-use-mcp / computer-use-swift / computer-use-input / claude-for-chrome-mcp） | `// TODO: Phase 6` | 内部包可获取后替换 | 43, 44 |
 | 87 | `react/compiler-runtime` shim | `src/types/shims/` 下 shim | `// TODO: Phase 6` | React Compiler 运行时正常 | 无 |
+| 88 | Context Collapse | `src/services/contextCollapse/index.js` | `// TODO: Phase 6` | getStats/subscribe/isContextCollapseEnabled 可用 | 无 |
+| 89 | Ultraplan Prompt | `src/utils/ultraplan/prompt.txt` | N/A | prompt.txt 可被 require | 无 |
 
 ---
 
