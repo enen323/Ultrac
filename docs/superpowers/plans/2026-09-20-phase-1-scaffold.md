@@ -462,26 +462,26 @@ git commit -m "feat: 为 cli.tsx 引用的缺失模块添加桩文件"
 
 **步骤：**
 
-- [ ] 步骤 1：安装新增包
+- [x] 步骤 1：安装新增包
 
 用 `bun add <pkg>...` 安装（可分批），确认最终 `package.json` 的 dependencies 与清单一致。
 
-- [ ] 步骤 2：确认安装无错误
+- [x] 步骤 2：确认安装无错误
 
 执行：`bun install`
 期望：无解析错误，`bun.lock` 更新。
 
-- [ ] 步骤 3：验证 JSON 合法
+- [x] 步骤 3：验证 JSON 合法
 
 执行：`bun run node -e "JSON.parse(require('fs').readFileSync('package.json','utf8')); console.log('OK')"`
 期望输出：`OK`
 
-- [ ] 步骤 4：验证 SDK 可导入
+- [x] 步骤 4：验证 SDK 可导入
 
 执行：`bun -e "import { Anthropic } from '@anthropic-ai/sdk'; console.log('sdk OK')"`
 期望输出：`sdk OK`
 
-- [ ] 步骤 5：提交
+- [x] 步骤 5：提交
 
 ```bash
 git add package.json bun.lock
@@ -524,20 +524,20 @@ git commit -m "feat: 补全 62 个公开依赖并添加 foundry-sdk"
 
 **步骤：**
 
-- [ ] 步骤 1：收集导出清单
+- [x] 步骤 1：收集导出清单
 
 grep 全部引用点，列出每个包的命名导出清单。
 
-- [ ] 步骤 2：写 shim 与声明
+- [x] 步骤 2：写 shim 与声明
 
 创建 5 个 shim + 5 条 `declare module` + 5 条 paths 映射。
 
-- [ ] 步骤 3：验证
+- [x] 步骤 3：验证
 
 执行：`bun build src/entrypoints/cli.tsx --target=bun --outdir=dist`
 期望：错误列表里不再出现这 5 个模块名（其他错误允许存在）。
 
-- [ ] 步骤 4：提交
+- [x] 步骤 4：提交
 
 ```bash
 git add tsconfig.json src/types/
@@ -594,18 +594,18 @@ git commit -m "feat: 为 @ant/* 内部包和 react/compiler-runtime 添加声明
 
 **步骤：**
 
-- [ ] 步骤 1：读引用点，收集命名导出
+- [x] 步骤 1：读引用点，收集命名导出
 
 逐个读上表引用点的 import 语句，收集每个目标文件需要导出的名字。
 
-- [ ] 步骤 2：建 23 个桩文件
+- [x] 步骤 2：建 23 个桩文件
 
-- [ ] 步骤 3：验证
+- [x] 步骤 3：验证
 
 执行：`bun build src/entrypoints/cli.tsx --target=bun --outdir=dist`
 期望：错误列表里不再出现上表任何 specifier。
 
-- [ ] 步骤 4：提交
+- [x] 步骤 4：提交
 
 ```bash
 git add src/
