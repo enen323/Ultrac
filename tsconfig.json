@@ -17,7 +17,13 @@
     "baseUrl": ".",
     "paths": {
       "src/*": ["./src/*"],
-      "bun:bundle": ["./src/types/bun-bundle.d.ts", "./src/types/bun-bundle.js"]
+      "bun:bundle": ["./src/types/bun-bundle.d.ts", "./src/types/bun-bundle.js"],
+      "@ant/claude-for-chrome-mcp": ["./src/types/shims/claude-for-chrome-mcp.ts", "./src/types/shims/claude-for-chrome-mcp.js"],
+      "@ant/computer-use-mcp": ["./src/types/shims/computer-use-mcp.ts", "./src/types/shims/computer-use-mcp.js"],
+      "@ant/computer-use-mcp/*": ["./src/types/shims/computer-use-mcp-*.ts", "./src/types/shims/computer-use-mcp-*.js"],
+      "@ant/computer-use-swift": ["./src/types/shims/computer-use-swift.ts", "./src/types/shims/computer-use-swift.js"],
+      "@ant/computer-use-input": ["./src/types/shims/computer-use-input.ts", "./src/types/shims/computer-use-input.js"],
+      "react/compiler-runtime": ["./src/types/shims/compiler-runtime.ts", "./src/types/shims/compiler-runtime.js"]
     }
   },
   "include": ["src/**/*.ts", "src/**/*.tsx"],
