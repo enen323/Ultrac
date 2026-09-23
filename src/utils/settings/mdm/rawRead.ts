@@ -34,15 +34,22 @@ function execFilePromise(
   args: string[],
 ): Promise<{ stdout: string; code: number | null }> {
   return new Promise(resolve => {
-    execFile(
-      cmd,
-      args,
-      { encoding: 'utf-8', timeout: MDM_SUBPROCESS_TIMEOUT_MS },
-      (err, stdout) => {
-        // biome-ignore lint/nursery/noFloatingPromises: resolve() is not a floating promise
-        resolve({ stdout: stdout ?? '', code: err ? 1 : 0 })
-      },
-    )
+    try {
+      execFile(
+        cmd,
+        args,
+        { encoding: 'utf-8', timeout: MDM_SUBPROCESS_TIMEOUT_MS },
+        (err, stdout) => {
+          // biome-ignore lint/nursery/noFloatingPromises: resolve() is not a floating promise
+          resolve({ stdout: stdout ?? '', code: err ? 1 : 0 })
+        },
+      )
+    } catch {
+      // uv_spawn 失败（EPERM/ENOENT 等）会在 executor 内同步抛出，导致
+      // startMdmRawRead() 成为 unhandled rejection 并中断启动。
+      // 受限环境（沙箱、企业管控、精简系统）下 reg.exe/plutil 不可用时应降级为"读不到"。
+      resolve({ stdout: '', code: 1 })
+    }
   })
 }
 
