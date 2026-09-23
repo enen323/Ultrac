@@ -36,6 +36,7 @@
 | 2026-09-21 | §9.1 | 6 条声明对应的桩文件已由 Task 7 创建（`src/daemon/main.ts` 等），「处理计划」改为按 stubs-registry 还原 |
 | 2026-09-21 | §9.2 | 补录 `@anthropic-ai/foundry-sdk`（grep 提取漏项）；确认 `commander` 无源码引用，从依赖集移除 |
 | 2026-09-21 | §9.5（新增） | 记录构建期缺失的 26 个本地 specifier / 23 个文件及建桩处理方式 |
+| 2026-09-23 | §9.2 | `@anthropic-ai/sdk` 版本约束 `^0.27.0` → `^0.128.0`——Phase 1 的版本号是计划里随手写的，源码 22 处 import `@anthropic-ai/sdk/resources/beta/messages/messages.mjs` 需要含 `./resources/*` 子路径的新版 exports，旧版直接造成 105 处类型错误 |
 
 ---
 
@@ -670,7 +671,7 @@ declare module '../self-hosted-runner/main.js';
 
 | 包 | 状态 |
 |---|---|
-| `@anthropic-ai/sdk` | ✅ |
+| `@anthropic-ai/sdk` | ✅（npm 最新 0.128.0） |
 | `@anthropic-ai/claude-agent-sdk` | ✅（npm 最新 0.3.278） |
 | `@anthropic-ai/mcpb` | ✅（npm 最新 2.1.2） |
 | `@anthropic-ai/sandbox-runtime` | ✅（npm 最新 0.0.77） |
