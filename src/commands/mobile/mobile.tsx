@@ -18,7 +18,7 @@ const PLATFORMS: Record<Platform, {
     url: 'https://apps.apple.com/app/claude-by-anthropic/id6473753684'
   },
   android: {
-    url: 'https://play.google.com/store/apps/details?id=com.anthropic.claude'
+    url: 'https://play.google.com/store/apps/details?id=com.anthropic.ultrac'
   }
 };
 function MobileQRCode(t0) {

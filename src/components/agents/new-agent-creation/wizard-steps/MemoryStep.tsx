@@ -37,28 +37,28 @@ export function MemoryStep() {
   let t1;
   if ($[1] !== isUserScope) {
     t1 = isUserScope ? [{
-      label: "User scope (~/.claude/agent-memory/) (Recommended)",
+      label: "User scope (~/.ultrac/agent-memory/) (Recommended)",
       value: "user"
     }, {
       label: "None (no persistent memory)",
       value: "none"
     }, {
-      label: "Project scope (.claude/agent-memory/)",
+      label: "Project scope (.ultrac/agent-memory/)",
       value: "project"
     }, {
-      label: "Local scope (.claude/agent-memory-local/)",
+      label: "Local scope (.ultrac/agent-memory-local/)",
       value: "local"
     }] : [{
-      label: "Project scope (.claude/agent-memory/) (Recommended)",
+      label: "Project scope (.ultrac/agent-memory/) (Recommended)",
       value: "project"
     }, {
       label: "None (no persistent memory)",
       value: "none"
     }, {
-      label: "User scope (~/.claude/agent-memory/)",
+      label: "User scope (~/.ultrac/agent-memory/)",
       value: "user"
     }, {
-      label: "Local scope (.claude/agent-memory-local/)",
+      label: "Local scope (.ultrac/agent-memory-local/)",
       value: "local"
     }];
     $[1] = isUserScope;
