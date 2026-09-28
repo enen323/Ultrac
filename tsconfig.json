@@ -24,7 +24,7 @@
       "@ant/computer-use-mcp/*": ["./src/types/shims/computer-use-mcp-*.ts", "./src/types/shims/computer-use-mcp-*.js"],
       "@ant/computer-use-swift": ["./src/types/shims/computer-use-swift.ts", "./src/types/shims/computer-use-swift.js"],
       "@ant/computer-use-input": ["./src/types/shims/computer-use-input.ts", "./src/types/shims/computer-use-input.js"],
-      "react/compiler-runtime": ["./src/types/shims/compiler-runtime.ts", "./src/types/shims/compiler-runtime.js"]
+      "color-diff-napi": ["./src/types/shims/color-diff-napi.ts"]
     }
   },
   "include": ["src/**/*.ts", "src/**/*.tsx"],
