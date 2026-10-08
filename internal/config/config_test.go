@@ -566,3 +566,59 @@ func jsonHas(t *testing.T, s Settings, section, key string) bool {
 	_, ok = obj[key]
 	return ok
 }
+
+// TestSettingsSetMutatesThroughPointerReceiver pins the receiver of Set.
+//
+// Under the previous value receiver every assignment below wrote to a copy and
+// the call site saw nothing happen, with no error to report. Nothing called Set
+// at the time so the bug stayed dormant; this test is what stops it from
+// coming back if a caller appears later.
+func TestSettingsSetMutatesThroughPointerReceiver(t *testing.T) {
+	s := mustSettings(t, `{"env":{"MODEL":"old"},"hooks":{"PreToolUse":[]}}`)
+
+	s.Set("env", json.RawMessage(`{"MODEL":"new","SMALL_FAST_MODEL":"flash"}`))
+	if len(s.Env) != 2 || s.Env["MODEL"] != "new" || s.Env["SMALL_FAST_MODEL"] != "flash" {
+		t.Fatalf("Set did not replace env through the pointer receiver: %v", s.Env)
+	}
+
+	s.Set("hooks", json.RawMessage(`{"Bash":[]}`))
+	if !jsonHas(t, s, "hooks", "Bash") {
+		t.Fatalf("Set did not write an extra key: %v", s.Extra)
+	}
+
+	s.Set("hooks", nil)
+	if _, ok := s.Extra["hooks"]; ok {
+		t.Fatal("blank value should delete the extra key")
+	}
+
+	s.Set("env", nil)
+	if s.Env != nil {
+		t.Fatalf("blank value should clear env, got %v", s.Env)
+	}
+
+	// A write must not lose the other sections via the marshaller.
+	s.Set("env", json.RawMessage(`{"MODEL":"z"}`))
+	s.Set("permissions", json.RawMessage(`{"allow":["Bash"]}`))
+	out := string(mustJSON(t, s))
+	for _, want := range []string{`"env"`, `"MODEL":"z"`, `"permissions"`, `"allow"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("marshalled output lost %s: %s", want, out)
+		}
+	}
+}
+
+// TestSettingsSetDoesNotPanicOnUntouchedReceiver covers the path taken when Set
+// is the first write on a freshly built settings object.
+func TestSettingsSetDoesNotPanicOnUntouchedReceiver(t *testing.T) {
+	var s Settings
+	s.Set("permissions", json.RawMessage(`{"allow":[]}`))
+	if _, ok := s.Extra["permissions"]; !ok {
+		t.Fatalf("Set on a zero Settings did not initialise Extra: %v", s.Extra)
+	}
+
+	var envOnly Settings
+	envOnly.Set("env", json.RawMessage(`{"MODEL":"m"}`))
+	if envOnly.Env["MODEL"] != "m" {
+		t.Fatalf("Set on a zero Settings did not populate Env: %v", envOnly.Env)
+	}
+}

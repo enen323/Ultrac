@@ -102,6 +102,16 @@ func (s *Settings) UnmarshalJSON(data []byte) error {
 
 // MarshalJSON reassembles Env and Extra into one object.
 //
+// NOTE on the mixed value/pointer receivers across this type: it is deliberate,
+// not an oversight. MarshalJSON must stay on a value receiver because
+// write() in loader.go passes Settings by value -- with a pointer receiver the
+// marshaller would not see the method, fall back to default serialization, and
+// drop Extra (json:"-"), silently erasing the user's hooks and permissions.
+// UnmarshalJSON must stay on a pointer or json.Unmarshal would quietly do
+// nothing. Only Set mutates, and it is the one on a pointer. Don't "fix" the
+// mix by flipping every method to pointers without also reworking the call
+// sites that pass Settings by value.
+//
 // Extra is written first and Env second so the typed field always wins for the
 // one key both can hold. Any "env" left in Extra by UnmarshalJSON is dropped
 // here, which is correct: it was only parked there to survive until this call.
@@ -145,7 +155,13 @@ func (s Settings) Get(key string) (json.RawMessage, bool) {
 
 // Set stores a top-level setting. A nil or empty raw value deletes the key,
 // which is how "blank field means remove it" is expressed for non-env sections.
-func (s Settings) Set(key string, raw json.RawMessage) {
+//
+// The receiver is a pointer on purpose. Under a value receiver every
+// assignment below lands on a copy, so the call site sees nothing change and
+// no error is raised -- a silent no-op that only shows up as "my setting was
+// saved but has no effect". See the mixed-receiver note on MarshalJSON for
+// why the other methods on Settings stay on values.
+func (s *Settings) Set(key string, raw json.RawMessage) {
 	if key == "env" {
 		if len(raw) == 0 {
 			s.Env = nil

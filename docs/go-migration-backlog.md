@@ -72,6 +72,10 @@
 | **0.3** | **错误模型与日志** | `utils/errors.ts`、`utils/log.ts`、`utils/errorLogSink.ts`、`utils/toolErrors.ts` | 4 文件 | `internal/logging` | 无 |
 | **0.4** | **Provider 客户端（含流式 SSE）** | `services/api/`（21 文件）、`services/rateLimitMessages.ts` | 21 文件 / ~5k | `internal/llm/anthropic` | 0.1 |
 
+**0.1 落地说明（2026-10-08 实测）**：「Go 目标」列填的是目录 `internal/config`，允许同目录下按职责拆多个文件。
+实际由 `config.go`（层定义与合并，含 `SourceDefault`）、`paths.go`（路径解析）、`keys.go`（env 键白名单 `safeEnvVars`）、
+`env.go`、`loader.go` 五个源文件加 `config_test.go` 组成，全部落在 `internal/config/`，与文档一致，无偏离。
+
 ### 0.1 DoD
 - 读 `~/.ultrac/settings.json` → 分层合并（default → user → project → flag → env）结果与 TS 侧逐项一致
 - `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` 置位时，provider 相关 env 从**所有**源消失
