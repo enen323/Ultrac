@@ -402,3 +402,53 @@ cp -r ~/.claude/. ~/.ultrac/ && mv ~/.claude.json ~/.ultrac.json
 `src/utils/permissions/filesystem.ts` 的 `DANGEROUS_FILES` / `DANGEROUS_DIRECTORIES`
 已从 `.claude.json` / `.claude` 改为 `.ultrac.json` / `.ultrac`，
 `.ultrac/worktrees/` 的结构化例外分支同步更新。**若不同步，安全防护会失效。**
+
+---
+
+## 8. `/provider`：把模型配置写进 settings.json（无需登录）
+
+### 8.1 为什么不需要改登录代码
+
+`isAnthropicAuthEnabled()`（`auth.ts`）在检测到任一外部凭据
+（`ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` / `apiKeyHelper`）时返回 `false`，
+于是 `Onboarding.tsx` 的 `oauth` 步骤不再被 push，`/login` 也只是提示语变化。
+**只要配置在 onboarding 之前进了 `process.env`，登录流程自然被跳过。**
+
+### 8.2 命令行为
+
+`/provider`（别名 `/apikey`，实现在 `src/commands/provider/`）是一个 local-jsx 向导，
+四个文本步骤 + 一个确认步骤，回车逐步前进、末步回车落盘：
+
+| 步骤 | 字段 | 写入的 env key |
+|---|---|---|
+| 1 | Base URL | `ANTHROPIC_BASE_URL` |
+| 2 | API Key（掩码显示） | `ANTHROPIC_AUTH_TOKEN` |
+| 3 | 主模型 | `ANTHROPIC_MODEL` |
+| 4 | 快模型 | `ANTHROPIC_SMALL_FAST_MODEL` |
+
+- **落盘位置**：`userSettings` → `~/.ultrac/settings.json`，写在 `env` 块里。
+  写盘复用 `updateSettingsForSource()`，已自带建目录、merge、内部写入标记、缓存失效。
+- **留空 = 删除该 key**：向导把空字段写成显式 `undefined`，`updateSettingsForSource`
+  的 customizer 会把它当成删除（不是留一个空字符串）。
+- **即写即生效**：写完调 `applyConfigEnvironmentVariables()` + `clearApiKeyHelperCache()`，
+  当前会话无需重启。
+
+### 8.3 关键约束：`CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` 会吞掉这些配置
+
+`managedEnvConstants.ts` 的 `PROVIDER_MANAGED_ENV_VARS` 含 `ANTHROPIC_BASE_URL` /
+`ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL` /
+`ANTHROPIC_SMALL_FAST_MODEL`；`managedEnv.ts` 的 `filterSettingsEnv()` 在
+`CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` 为真时把这些 key 从**所有** settings 源
+（含 `userSettings`）里剔掉，且该 flag 无法由 settings 自己关闭。
+
+**排查"配置写了不生效"先看这个变量。** `/provider` 的确认步骤会在检测到它时给出告警。
+本仓库已删除 `.env`（其中曾设该 flag），配置统一由 `~/.ultrac/settings.json` 承载。
+
+### 8.4 为什么默认写用户级而不是项目级
+
+`applySafeConfigEnvironmentVariables()` 在 trust 弹窗**之前**只应用
+`TRUSTED_SETTING_SOURCES`（`userSettings` / `flagSettings` / `policySettings`）的全量 env；
+项目级 env 在 trust 前只走 `SAFE_ENV_VARS` 白名单，而 `ANTHROPIC_BASE_URL` /
+`ANTHROPIC_AUTH_TOKEN` **不在白名单**。所以项目级配置在新目录首启时可能来不及生效，
+用户级才是"配一次、任何项目都不弹登录"的位置。（`-p` 模式不受此限，trust 隐式。）
+
