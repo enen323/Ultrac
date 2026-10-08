@@ -1,0 +1,34 @@
+<svg viewBox="0 0 680 440" width="100%" role="img" xmlns="http://www.w3.org/2000/svg">
+  <title>Ultra — the code nautilus mascot for the Ultrac project</title>
+  <desc>A friendly purple spiral-shell nautilus with a blue head, big eyes, wavy tentacles, and a green terminal prompt on its shell, symbolizing the agent loop and sandbox.</desc>
+  <ellipse cx="300" cy="402" rx="195" ry="17" fill="#D3D1C7"/>
+  <ellipse cx="430" cy="245" rx="150" ry="105" fill="#B5D4F4" stroke="#185FA5" stroke-width="2.5"/>
+  <circle cx="250" cy="215" r="125" fill="#CECBF6" stroke="#534AB7" stroke-width="2.5"/>
+  <path d="M370 215 A115 115 0 0 1 140 215 A95 95 0 0 1 330 215 A78 78 0 0 1 174 215 A60 60 0 0 1 294 215 A44 44 0 0 1 202 215 A28 28 0 0 1 258 215 A14 14 0 0 1 230 215" fill="none" stroke="#534AB7" stroke-width="3" stroke-linecap="round"/>
+  <g stroke="#AFA9EC" stroke-width="1.4">
+    <line x1="250" y1="215" x2="150" y2="140"/>
+    <line x1="250" y1="215" x2="120" y2="240"/>
+    <line x1="250" y1="215" x2="180" y2="330"/>
+    <line x1="250" y1="215" x2="330" y2="335"/>
+    <line x1="250" y1="215" x2="360" y2="250"/>
+    <line x1="250" y1="215" x2="300" y2="120"/>
+  </g>
+  <path d="M242 202 L262 215 L242 228" fill="none" stroke="#3B6D11" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="250" cy="215" r="7" fill="#639922"/>
+  <path d="M535 208 L552 176 L562 208 Z" fill="#85B7EB" stroke="#185FA5" stroke-width="2"/>
+  <ellipse cx="475" cy="240" rx="28" ry="28" fill="#FFFFFF" stroke="#0C447C" stroke-width="2"/>
+  <ellipse cx="528" cy="240" rx="28" ry="28" fill="#FFFFFF" stroke="#0C447C" stroke-width="2"/>
+  <circle cx="481" cy="244" r="13" fill="#2C2C2A"/>
+  <circle cx="534" cy="244" r="13" fill="#2C2C2A"/>
+  <circle cx="476" cy="238" r="4.5" fill="#FFFFFF"/>
+  <circle cx="529" cy="238" r="4.5" fill="#FFFFFF"/>
+  <path d="M458 272 Q503 300 548 272" fill="none" stroke="#2C2C2A" stroke-width="3" stroke-linecap="round"/>
+  <g fill="none" stroke="#185FA5" stroke-width="3" stroke-linecap="round">
+    <path d="M380 335 q -8 35 -22 50"/>
+    <path d="M422 345 q -4 38 -14 52"/>
+    <path d="M472 348 q 0 40 -2 54"/>
+    <path d="M522 345 q 6 38 18 50"/>
+    <path d="M562 335 q 10 35 24 48"/>
+  </g>
+  <text x="340" y="430" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#5F5E5A">Ultra — the looping shell</text>
+</svg>
