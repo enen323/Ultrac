@@ -12,14 +12,20 @@ import (
 // earlier one. The sequence is fixed because it is observable behaviour, not
 // an implementation detail — a project file that silently outranked a command
 // line flag would be a bug nobody could reproduce.
+//
+// SourceEnv is deliberately absent. Environment variables are not a settings
+// layer: they are what the settings layers are applied *to*. Modelling them as
+// a layer is how "settings wrote the env but the env won" bugs happen.
 type Source int
 
 const (
+	// SourceDefault carries built-in defaults. It has no file behind it.
 	SourceDefault Source = iota
 	SourceUser
 	SourceProject
+	SourceLocal
 	SourceFlag
-	SourceEnv
+	SourcePolicy
 )
 
 func (s Source) String() string {
@@ -30,10 +36,12 @@ func (s Source) String() string {
 		return "user"
 	case SourceProject:
 		return "project"
+	case SourceLocal:
+		return "local"
 	case SourceFlag:
 		return "flag"
-	case SourceEnv:
-		return "env"
+	case SourcePolicy:
+		return "policy"
 	default:
 		return fmt.Sprintf("source(%d)", int(s))
 	}
@@ -41,29 +49,131 @@ func (s Source) String() string {
 
 // Settings is the shape of a settings file.
 //
-// Only Env is modelled so far, because that is the only section verified in
-// ~/.ultrac/settings.json. When other sections are ported they get typed
-// fields here.
+// Only Env is typed. That is not laziness about scope — it is a statement
+// about who owns the file. ~/.ultrac/settings.json is read by the TypeScript
+// implementation too, and a struct with forty typed fields would silently drop
+// the thirty-eight this version has never heard of on write. So unknown
+// sections live in Extra, verbatim, and survive a read-modify-write cycle.
 //
-// Extra is required before this package is allowed to write a settings file:
-// the file is shared with the TypeScript implementation, and a writer that
-// drops sections it does not model would delete the other side's
-// configuration. Until a round-trip that preserves unknown keys exists,
-// reads may proceed and writes must not.
+// A writer is only correct here because of Extra. Remove it and the first
+// `/provider` run on a machine with hooks configured deletes the hooks block.
 type Settings struct {
 	Env map[string]string `json:"env,omitempty"`
 
-	// Extra holds sections this version does not model, preserved verbatim so
-	// a write cannot lose them.
+	// Extra holds every other top-level key, preserved byte-for-byte as JSON.
+	// Marshalling merges Extra and Env into one object; see MarshalJSON.
 	Extra map[string]json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON splits a settings document into Env and Extra.
+//
+// A malformed "env" block is not fatal: it lands in Extra instead, so the rest
+// of the file still loads and the user sees a validation error rather than an
+// empty configuration. Losing every hook because one env value was a number is
+// the worse failure.
+func (s *Settings) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	s.Extra = make(map[string]json.RawMessage, len(raw))
+	for k, v := range raw {
+		if k == "env" {
+			continue
+		}
+		s.Extra[k] = v
+	}
+
+	s.Env = nil
+	envRaw, ok := raw["env"]
+	if !ok {
+		return nil
+	}
+	var env map[string]string
+	if err := json.Unmarshal(envRaw, &env); err == nil {
+		s.Env = env
+		return nil
+	}
+	// Not a map[string]string. Keep it so a write cannot lose it.
+	s.Extra["env"] = envRaw
+	return nil
+}
+
+// MarshalJSON reassembles Env and Extra into one object.
+//
+// Extra is written first and Env second so the typed field always wins for the
+// one key both can hold. Any "env" left in Extra by UnmarshalJSON is dropped
+// here, which is correct: it was only parked there to survive until this call.
+func (s Settings) MarshalJSON() ([]byte, error) {
+	out := make(map[string]json.RawMessage, len(s.Extra)+1)
+	for k, v := range s.Extra {
+		if k == "env" {
+			continue
+		}
+		out[k] = v
+	}
+	if len(s.Env) > 0 {
+		env, err := json.Marshal(s.Env)
+		if err != nil {
+			return nil, err
+		}
+		out["env"] = env
+	}
+
+	// json.Marshal sorts map keys, which is what we want: the TypeScript
+	// writer emits sorted keys too, so the two implementations produce
+	// byte-identical files for identical input and git diffs stay quiet.
+	return json.Marshal(out)
+}
+
+// Get returns a top-level setting as raw JSON, searching Env-aware Extra last.
+func (s Settings) Get(key string) (json.RawMessage, bool) {
+	if key == "env" {
+		if s.Env == nil {
+			return nil, false
+		}
+		b, err := json.Marshal(s.Env)
+		if err != nil {
+			return nil, false
+		}
+		return b, true
+	}
+	v, ok := s.Extra[key]
+	return v, ok
+}
+
+// Set stores a top-level setting. A nil or empty raw value deletes the key,
+// which is how "blank field means remove it" is expressed for non-env sections.
+func (s Settings) Set(key string, raw json.RawMessage) {
+	if key == "env" {
+		if len(raw) == 0 {
+			s.Env = nil
+			return
+		}
+		var env map[string]string
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return
+		}
+		s.Env = env
+		return
+	}
+	if len(raw) == 0 {
+		delete(s.Extra, key)
+		return
+	}
+	if s.Extra == nil {
+		s.Extra = make(map[string]json.RawMessage)
+	}
+	s.Extra[key] = raw
 }
 
 // Layer is one loaded source.
 type Layer struct {
 	Source Source
-	// Path is the file the layer came from. Empty for defaults, flags and the
-	// environment, which have no file behind them. It is reported to the user
-	// when they ask where a value came from.
+	// Path is the file the layer came from. Empty for defaults and flags,
+	// which have no file behind them. It is reported to the user when they
+	// ask where a value came from.
 	Path     string
 	Settings Settings
 }
@@ -78,43 +188,38 @@ type Resolver interface {
 	// Get resolves the stack for a working directory.
 	Get(ctx context.Context, cwd string) (*Settings, error)
 
-	// Update applies mutate to one source and persists it.
-	Update(ctx context.Context, src Source, mutate func(*Settings) error) error
+	// Layers returns each loaded source separately, for /config and for
+	// "where did this value come from" answers.
+	Layers(ctx context.Context, cwd string) ([]Layer, error)
+
+	// Update applies mutate to one source and persists it. cwd locates the
+	// project-scoped files; it is ignored by the user-level source.
+	Update(ctx context.Context, src Source, cwd string, mutate func(*Settings) error) error
 
 	// Invalidate drops the cached view of one source. Callers that write a
 	// settings file behind the resolver's back need this.
 	Invalidate(src Source)
 }
 
-// EffectiveEnv merges the env blocks of the given layers, lowest precedence
-// first, and applies the host-managed suppression.
-//
-// The suppression is applied here rather than at each call site so that no
-// caller can forget it, and so that the rule has exactly one test.
-func EffectiveEnv(layers []Layer) map[string]string {
-	out := make(map[string]string)
-
-	for _, layer := range layers {
-		for k, v := range layer.Settings.Env {
-			out[k] = v
-		}
-	}
-
-	if isTruthy(out[EnvProviderManagedByHost]) {
-		for _, k := range ProviderEnvKeys {
-			delete(out, k)
-		}
-	}
-	return out
+// Error is a settings problem worth showing the user: a malformed file, a
+// directory where a file should be. It is distinct from "the file is absent",
+// which is not an error at all.
+type Error struct {
+	Path    string
+	Op      string
+	Err     error
+	Warning bool
 }
 
-// isTruthy matches the TypeScript side's reading of a boolean environment
-// variable, where an unset variable and "0"/"false" are both false.
-func isTruthy(v string) bool {
-	switch v {
-	case "", "0", "false", "FALSE", "False", "no", "off":
-		return false
-	default:
-		return true
-	}
+func (e *Error) Error() string {
+	return fmt.Sprintf("config: %s %s: %v", e.Op, e.Path, e.Err)
+}
+
+func (e *Error) Unwrap() error { return e.Err }
+
+// Warningf marks an Error as recoverable. The loader collects warnings instead
+// of aborting: one bad file in the stack must not take down the other four.
+func (e *Error) Warningf() *Error {
+	e.Warning = true
+	return e
 }

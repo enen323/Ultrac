@@ -51,6 +51,11 @@ type Block struct {
 
 	Text string `json:"text,omitempty"`
 
+	// Signature authenticates an extended-thinking block. It is sent back
+	// verbatim on the next turn; dropping it makes the API reject the whole
+	// request, so it is modelled rather than treated as an opaque extra.
+	Signature string `json:"signature,omitempty"`
+
 	ToolUseID string          `json:"toolUseId,omitempty"`
 	ToolName  string          `json:"toolName,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`

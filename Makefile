@@ -18,24 +18,30 @@ LDFLAGS := -s -w \
 	-X ultrac/internal/version.GitCommit=$(COMMIT) \
 	-X ultrac/internal/version.BuildTimeUTC=$(BUILT)
 
-.PHONY: build vet test fmt clean check
+.PHONY: build vet test fmt clean check live
 
 build:
 	CGO_ENABLED=0 $(GO) build -ldflags "$(LDFLAGS)" -o bin/ultrac$(GOEXE) ./cmd/ultrac
 
 vet:
-	$(GO) vet ./...
+	$(GO) vet ./cmd/... ./internal/...
 
 test:
-	$(GO) test ./...
+	$(GO) test ./cmd/... ./internal/...
 
 fmt:
-	$(GO) fmt ./...
+	$(GO) fmt ./cmd/... ./internal/...
+
+# The local quality gate. Scoped to ./cmd and ./internal on purpose: `./...`
+# walks node_modules (31k files) and gets killed before it reaches our code.
+check: vet test
+
+# live runs the checks that hit the real endpoint, using whatever provider
+# ~/.ultrac/settings.json configures. Separate from `test` because it spends
+# the user's quota and needs network.
+live: build
+	./bin/ultrac$(GOEXE) doctor
+	./bin/ultrac$(GOEXE) ask "reply with exactly: GO-T0-OK"
 
 clean:
 	rm -rf bin
-
-# The local quality gate. `go vet` alone misses nothing here yet, but the
-# target exists so that adding checks later does not change the command
-# reviewers and agents are told to run.
-check: vet test
