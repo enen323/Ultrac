@@ -29,6 +29,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 )
 
 // EntryType discriminates a transcript entry.
@@ -235,13 +236,21 @@ func SanitizePath(name string) string {
 // djb2 rather than a cryptographic hash because this only needs to be stable
 // and cheap, and because the TypeScript side uses the same algorithm — a
 // different hash means a different directory name means orphaned sessions.
-// Signed 32-bit arithmetic, matching hash.ts, so the value agrees.
+//
+// Three details exist purely so the two implementations agree:
+//
+//   - The iteration is over UTF-16 code units, because that is what
+//     `str.charCodeAt(i)` walks. Walking runes instead would hash a different
+//     sequence for any non-ASCII path and produce a different directory name
+//     for the same directory.
+//   - The accumulator is int32. Go's int32 arithmetic already wraps on
+//     overflow, which is what JavaScript's `| 0` coerces to, so no explicit
+//     truncation is needed — the type is the truncation.
+//   - A negative result is negated, matching `hash.ts`.
 func SimpleHash(s string) string {
 	var h int32
-	for _, r := range s {
-		// Iterate bytes, not runes: the TS side uses charCodeAt on UTF-16
-		// units, and matching that on ASCII paths is what matters here.
-		h = ((h << 5) - h + int32(byte(r))) | 0
+	for _, unit := range utf16.Encode([]rune(s)) {
+		h = (h << 5) - h + int32(unit)
 	}
 	if h < 0 {
 		h = -h

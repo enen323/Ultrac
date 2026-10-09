@@ -1,9 +1,7 @@
 package anthropic
 
 import (
-	"bufio"
 	"bytes"
-	"strings"
 )
 
 // sseData extracts the payload of one SSE line.
@@ -31,21 +29,4 @@ func sseData(line []byte) ([]byte, bool) {
 		return nil, false
 	}
 	return value, true
-}
-
-// sseScanner is a convenience for tests and any future non-scanner reader.
-func newSSEScanner(r *bufio.Reader) *bufio.Scanner {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-	return sc
-}
-
-// eventName extracts the `event:` field of an SSE block, if present. Exposed
-// for diagnostics: when a stream misbehaves, the event name is often the only
-// clue about what the server actually sent.
-func eventName(line string) string {
-	if !strings.HasPrefix(line, "event:") {
-		return ""
-	}
-	return strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 }

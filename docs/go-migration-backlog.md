@@ -63,7 +63,7 @@
 
 ---
 
-## T0 — 地基（4 项，不完成则一切无从下手）
+## T0 — 地基（4 项，不完成则一切无从下手） （已完成）
 
 | # | 功能 | TS 位置 | 体量 | Go 目标 | 依赖 |
 |---|---|---|---|---|---|
@@ -92,7 +92,7 @@
 
 ---
 
-## T1 — 最小可用 Agent（7 项，能完成一次真实编码任务）
+## T1 — 最小可用 Agent（7 项，能完成一次真实编码任务） （已完成）
 
 | # | 功能 | TS 位置 | 体量 | Go 目标 | 依赖 |
 |---|---|---|---|---|---|
@@ -103,6 +103,89 @@
 | **1.5** | **CLI 入口 + headless** | `entrypoints/cli.tsx`、`entrypoints/init.ts`、`cli/print.ts` | ~2k | `cmd/ultrac` | 0.1 |
 | **1.6** | **NDJSON 事件协议** | `cli/ndjsonSafeStringify.ts`、`entrypoints/sdk/controlSchemas.ts`、`cli/structuredIO.ts` | ~1k | `internal/transport` | 1.1 |
 | **1.7** | **最小输出面** | —（新增） | — | `internal/transport/sink` | 1.6 |
+
+### T1 落地说明（2026-10-09 实测）
+
+7 项全部落地。本次新增 **29 个源文件 + 7 个测试文件**；`cmd/` 与 `internal/` 现在合计
+**14,434 行非测试 + 5,766 行测试**（含 T0 的既有部分，`find cmd internal -name '*.go'` 可复现），
+其中 **95 个测试函数**落在 T1 新增的七个包上。
+「Go 目标」列写的包全部对上；**只多出一个文档里没有的包 `internal/shell`**，
+它是 `permission` 与 `BashTool` 共享的 shell 命令分类器（L3 基础设施），拆分理由见下方偏离项 #3。
+
+`make check`（vet + test）全绿，`staticcheck ./internal/... ./cmd/...` **零告警**。
+
+| 功能包 | Go 包 | 实测行数 | 测试函数 | 验收证据 |
+|---|---|---:|---:|---|
+| 1.1 | `internal/engine` | 1,090 | 19 | 单轮/多轮工具闭环、maxTurns、取消、未知工具、工具级失败、并行时序、结果保序 |
+| 1.2 | `internal/engine/prompt` | 360 | 13 | 段落齐备、只提存在的工具、CLAUDE.md/.ultrac/rules、override/custom/append 三级优先级 |
+| 1.3 | `internal/tool/builtin` | 3,515 | 28 | 12 个工具全注册；每个 input schema 都是合法 JSON Schema；Read/Write/Edit/Glob/Grep/Bash/Todo 逐个边界 |
+| 1.4 | `internal/permission` + `internal/shell` | 906 + 690 | 12 + 4 | 4 模式行为、规则解析/匹配/相对路径、路径校验、危险模式、AST 分类 |
+| 1.5 | `cmd/ultrac` | 1,243 | **0** | 只有实机验收。见下方「已知缺口」 |
+| 1.6 | `internal/transport` | 357 | 10 | 每种事件一行合法 JSON、U+2028/29 转义、block index、并发不串行 |
+| 1.7 | `internal/transport/sink` | 331 | 9 | text/json 两种输出面，stdout 与 stderr 严格分离 |
+
+合计 **95 个测试函数**。
+
+> **已知缺口**：`cmd/ultrac` 的 flag 解析（`flags.go`）**没有单元测试**，只靠实机调用覆盖。
+> 它是唯一一处"用户输入 → 行为"的解析代码，错误路径（缺值、未知 flag、`--setting-sources` 之类的取值校验）
+> 目前只有人工跑过。补一个 `flags_test.go` 是下次动 CLI 时该做的第一件事。
+
+**实机验收（真实 endpoint，~/.ultrac/settings.json 的 deepseek 配置）**
+
+```
+❯ ultrac -p "In .tmp/t1/greet.go, change the greeting from hi to hello. Then verify by reading
+            the file back and say VERIFIED." --permission-mode acceptEdits
+  → Read  file_path=...\greet.go
+  ✓ Read       1	package main ...
+  → Edit  file_path=...\greet.go
+  ✓ Edit  Edited ...greet.go: replaced 1 occurrence(s)
+          @@ -1,5 +1,5 @@
+          -	return "hi"
+          +	return "hello"
+  → Read  file_path=...\greet.go
+  ✓ Read       4		return "hello"
+Verified. The file now returns "hello".VERIFIED
+```
+
+一次「读 → 改 → 读回验证 → 报告」的完整闭环，多轮工具调用、diff 渲染、最终答案全部正确。
+
+**4 模式行为一致性（同一句写文件指令，逐模式实测）**
+
+| 模式 | 结果 | 原因 |
+|---|---|---|
+| `default` | 文件未创建 | 无提问前端，ask → deny，并给出可执行的补救说明 |
+| `acceptEdits` | **文件已创建** | 文件编辑自动批准 |
+| `plan` | 文件未创建 | 计划模式只读，直接 deny |
+| `bypassPermissions` | **文件已创建** | 除 deny 规则外全部批准 |
+
+另外实测：`--add-dir` 确实扩大了作用域（同一路径，不加参数被拒、加了参数写入成功）；
+`Read(go.mod)` 这类**相对路径规则**能从 settings.json 生效；模型被拒后没有绕道 Bash 重试（Bash 侧也被正确判为 write）。
+
+### T1 的 8 处有意偏离（都不是"忘了做"）
+
+| # | 偏离 | 为什么 | 影响面 |
+|---|---|---|---|
+| 1 | **Grep/Glob 不走 ripgrep**，用纯 Go 遍历 | 本机无 `rg`，TS 侧也没把它 vendor 进 `node_modules`。计划书说"优先保留 rg 子进程"，前提是有 rg | **`.gitignore` 不再被遵守**。改为按名字跳过 VCS 目录（`.git`/`.svn`/`.hg`…）与依赖目录（`node_modules`/`vendor`/`__pycache__`/`target`/`dist`…）。行为差异已知，T2 要做真 gitignore 语义得单独排一项 |
+| 2 | **Bash 判定纯 AST，无模型分类器** | TS 的 `bashClassifier`/`yoloClassifier` 要模型调用，权限层拿不到。改按计划书 §1.4 DoD 的"判定读结构不读措辞"，用 `mvdan.cc/sh` 解析真实 AST | 无法识别"语义危险但语法平庸"的命令（例如 `python -c '...'` 只会被归为 interpreter → ask，而不会被判为 destructive）。**保守方向是安全方向**：判不出来一律 ask |
+| 3 | **`internal/shell` 被拆成独立包** | `permission`（判"能不能跑"）和 `BashTool`（判"能不能并发/是否只读"）需要同一个答案，而 L2 之间禁止横向引用。放 L3 基础设施层两边都能用 | 无。反而消除了一个潜在循环依赖 |
+| 4 | **thinking 块不回灌** | 回放 thinking 需要它的 signature，而 provider 累积了却没对外暴露。发一个没有 signature 的 thinking 块会让 API 拒绝整个请求 | 开了 thinking 时多轮会丢推理上下文，已发 `notice` 明说（`thinking_not_replayed`）。signature 打通是 T2 的事 |
+| 5 | **`AskUserQuestion` 在没有前端时拒绝** | T1 没有交互前端。留了 `SetAskHandler` 注入点，GUI/SDK 接上就能用 | headless 下工具返回明确说明，让模型把问题写进回复而不是空等 |
+| 6 | **`Agent` / `TaskOutput` 靠注入实现** | 跑子 agent 等于再跑一遍 query 循环，只有 engine 能做；`builtin` import `engine` 就是真循环依赖 | `SetAgentRunner` / `SetTaskOutputProvider` 两个注入点已就绪且已测，但 **engine 目前没有安装 runner**（子 agent 入口归 T2.5）。理由是宁可不做也不做半截 |
+| 7 | **`WebSearch` 抓 DuckDuckGo HTML** | 没有托管搜索 API。抓解析会随对方改版失效 | 已在工具返回里明说"这不等同于搜到 0 条结果"，失败不会伪装成成功 |
+| 8 | **headless 下按已信任处理** | 无信任弹窗可弹。这是**主动放宽**：项目级 settings.json 的 env 会全量应用 | 与 TS 非交互会话一致，也是项目级 provider 配置唯一能生效的路径。已在 `cmd/ultrac/agent.go` 注释里写明 |
+
+**另外三处超出 8 个 flag 的最小追加**（不加则 agent 在某些常规场景下不可用）：
+`--dangerously-skip-permissions`（等价 `--permission-mode bypassPermissions`）、`--max-turns`、
+`--append-system-prompt` / `--system-prompt`。
+
+**新增依赖**：`mvdan.cc/sh/v3`（纯 Go，免 CGO）。这是 T1 唯一一个新增的第三方依赖，
+用途就是偏离项 #2——计划书 §5.2.4 把它列为"必须用 mvdan/sh"。
+
+**T1 没做、留给后续的**：
+- transcript 只记「用户提问 + 最终回答 + last-prompt」三条，**不可 replay**（完整回放归 T2.6）
+- 后台命令只返回 PID，不捕获输出（任务注册表归 T2.5）
+- 图片/PDF 不渲染，返回 base64 + 说明（多模态不属 T1）
+- 没有沙箱：`--add-dir` 只管权限作用域，`dangerouslyDisableSandbox` 目前是空操作（归 T2.8）
 
 ### 1.3 核心 12 工具（分批建议）
 
@@ -303,7 +386,18 @@
 
 ### 已经在手的部分
 
-上一轮已落地（见 `internal/contract/`）：`Tool[In]` 契约、`Provider` 注册表、`Event` 流、`config` 分层骨架、`version`。①③⑤ 会直接用到它们。
+`internal/contract/` 提供两端都要用的契约：`Tool[In]`、`Provider` 注册表、`Event` 流、`config` 分层骨架、`version`。
+①③⑤ 直接建在它们上面，没有改契约。
+
+**这份清单里的 ①–⑤ 已全部做完，7 项 T1 也全部落地**（见上方「T1 落地说明」）。
+现在加一项新能力，落点是明确的：
+
+| 想加什么 | 落点 |
+|---|---|
+| 一个新工具 | `internal/tool/builtin/` 下加一个文件，`init()` 里 `RegisterBuiltin` |
+| 一个新模型厂商 | `internal/llm/<vendor>/` 包 + `provider.Register`，engine 一行不改 |
+| 一个新的输出/交互面 | 实现 `event.Sink`，engine 不知道它存在 |
+| 一条新的权限策略 | `internal/permission` 的规则表或 `Check`，工具侧无感 |
 
 ### 建议的分支纪律
 
@@ -330,3 +424,14 @@ POSIX 段中还有：`--background` / `--bg`、`--chrome-native-host`、`--claud
 > **先做被依赖的（T0），再做能闭环的（T1），然后补齐日常（T2），TUI 永远最后。**
 >
 > 513k 行里真正阻塞你的只有 **4 项 T0 + 7 项 T1**。剩下的都是"什么时候想要什么时候做"。
+
+**进度**：T0 已完成（4/4），**T1 已完成（7/7）**，最小可用 Go agent 已经在跑——
+
+```bash
+ultrac -p "把 .tmp/t1/greet.go 里的 hi 改成 hello，改完读回验证" --permission-mode acceptEdits
+ultrac -p "总结 internal/engine" --output-format stream-json      # NDJSON，可被程序解析
+ultrac -p "..." --permission-mode plan                            # 只读排查
+```
+
+下一站是 T2，其中 **2.1 上下文治理**是第一个必须做的：现在没有任何压缩，
+一旦对话长了就会撞上下文窗口，`max_turns` 会以"停得莫名其妙"的形式暴露出来。

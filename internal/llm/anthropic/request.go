@@ -159,6 +159,11 @@ func encodeMessage(msg provider.Message) (wireMessage, error) {
 		}
 		out.Content = append(out.Content, block)
 	}
+	// Empty-text blocks are dropped before the check below, not after: a
+	// message whose only block was an empty assistant text would otherwise
+	// become `{"type":""}`, which the API rejects with a message that says
+	// nothing about the empty string that caused it.
+	out = stripEmptyBlocks(out)
 	if len(out.Content) == 0 {
 		return wireMessage{}, fmt.Errorf("message has no content blocks")
 	}

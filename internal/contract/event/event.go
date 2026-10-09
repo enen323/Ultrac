@@ -92,6 +92,32 @@ type Failure struct {
 	Fatal bool `json:"fatal,omitempty"`
 }
 
+// Failure codes. These are wire values: a caller compares against them, so
+// renaming one is a protocol break.
+const (
+	// CodeProviderError means the model endpoint failed or refused.
+	CodeProviderError = "provider_error"
+	// CodeNoProvider means no model was configured at all.
+	CodeNoProvider = "no_provider"
+	// CodeMaxTurns means the loop stopped at its turn limit.
+	CodeMaxTurns = "max_turns"
+	// CodeMaxTokens means the model hit its output ceiling.
+	CodeMaxTokens = "max_tokens"
+	// CodeTruncated means the stream ended before the model finished.
+	CodeTruncated = "truncated_stream"
+	// CodeCancelled means the caller cancelled.
+	CodeCancelled = "cancelled"
+	// CodePermissionDenied means policy refused a tool call.
+	CodePermissionDenied = "permission_denied"
+	// CodeUnknownTool means the model called a tool that is not registered.
+	CodeUnknownTool = "unknown_tool"
+	// CodeToolFailed means a tool returned a Go error, not a tool-level
+	// failure. A tool that merely failed is a ToolResult with IsError.
+	CodeToolFailed = "tool_failed"
+	// CodeNoPrompt means the request had no user message.
+	CodeNoPrompt = "empty_prompt"
+)
+
 // Event is one step of the stream.
 //
 // It is a single struct with a discriminator rather than an interface so that

@@ -91,7 +91,6 @@ type Logger struct {
 	version    string
 	disabled   bool
 	recent     []ErrorRecord
-	onError    func(error)
 	errorQueue []error
 	sink       Sink
 }

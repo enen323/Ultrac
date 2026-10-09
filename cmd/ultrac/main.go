@@ -46,52 +46,60 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
+// run dispatches one invocation.
+//
+// Subcommands are recognised before flags are parsed, so `ultrac config
+// --debug` keeps meaning "run the config command verbosely" rather than
+// "run the agent on the prompt 'config' with debug logging". The check is on
+// the first argument only: a subcommand is the first word of the line or it is
+// not a subcommand.
 func run(args []string, stdout, stderr io.Writer) int {
-	switch {
-	case len(args) == 0:
-		usage(stdout)
-		return 0
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		switch args[0] {
+		case "config":
+			return runConfig(args[1:], stdout, stderr)
+		case "sessions":
+			return runSessions(args[1:], stdout, stderr)
+		case "ask":
+			return runAsk(args[1:], stdout, stderr)
+		case "doctor":
+			return runDoctor(args[1:], stdout, stderr)
+		case "help":
+			usage(stdout)
+			return 0
+		}
+	}
 
-	case args[0] == "--version" || args[0] == "-v":
-		fmt.Fprintln(stdout, version.String())
-		return 0
-
-	case args[0] == "--help" || args[0] == "-h" || args[0] == "help":
-		usage(stdout)
-		return 0
-
-	case args[0] == "config":
-		return runConfig(args[1:], stdout, stderr)
-
-	case args[0] == "sessions":
-		return runSessions(args[1:], stdout, stderr)
-
-	case args[0] == "ask":
-		return runAsk(args[1:], stdout, stderr)
-
-	case args[0] == "doctor":
-		return runDoctor(args[1:], stdout, stderr)
-
-	default:
-		fmt.Fprintf(stderr, "ultrac: unknown command %q\n\n", args[0])
+	f, err := parseFlags(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "ultrac: %v\n\n", err)
 		usage(stderr)
 		return 2
 	}
+	if f.Help {
+		usage(stdout)
+		return 0
+	}
+	if f.Version {
+		fmt.Fprintln(stdout, version.String())
+		return 0
+	}
+	if len(args) == 0 {
+		usage(stdout)
+		return 0
+	}
+	if strings.TrimSpace(f.Prompt) == "" {
+		fmt.Fprintln(stderr, "ultrac: no prompt given.")
+		fmt.Fprintln(stderr, "        Pass a prompt to run the agent, or `ultrac --help` for the flag list.")
+		return 2
+	}
+	return runAgent(f, stdout, stderr)
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintf(w, "ultrac %s — Go engine\n\n", version.Get().Version)
-	fmt.Fprintln(w, "Commands:")
-	fmt.Fprintln(w, "  config              show the resolved settings stack and effective env")
-	fmt.Fprintln(w, "  sessions [dir]      list transcripts for a directory (default: cwd)")
-	fmt.Fprintln(w, "  ask <prompt>        stream one completion, printing text as it arrives")
-	fmt.Fprintln(w, "  doctor              check the foundation end to end")
-	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  provider kinds: %s\n", listOrNone(provider.Kinds()))
-	fmt.Fprintf(w, "  built-in tools:    %s\n", listOrNone(tool.BuiltinNames()))
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Flags:")
-	fmt.Fprintln(w, "  --debug             verbose logging on stderr")
+	usageText(w, version.Get().Version,
+		listOrNone(provider.Kinds()),
+		listOrNone(tool.BuiltinNames()))
 }
 
 // runConfig prints each settings layer and the env they produce.
@@ -434,8 +442,16 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// 5. Path agreement with the TypeScript implementation.
-	check("session: dir name", session.SanitizePath(cwd) == session.SanitizePath(cwd),
-		session.SanitizePath(cwd))
+	//
+	// The sanitised name becomes a single directory component, so it must have
+	// no separators left in it: a stray one would create nested directories
+	// that no other reader looks in. The earlier version of this check
+	// compared the value with itself, which could only ever pass.
+	dirName := session.SanitizePath(cwd)
+	clean := dirName != "" &&
+		!strings.ContainsAny(dirName, `/\`) &&
+		dirName == filepath.Base(dirName)
+	check("session: dir name", clean, dirName)
 
 	fmt.Fprintln(stdout)
 	if failures == 0 {

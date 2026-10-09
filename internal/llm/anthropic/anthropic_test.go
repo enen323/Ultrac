@@ -1034,6 +1034,76 @@ func TestConsumerBreakingEarlyDoesNotBlock(t *testing.T) {
 
 // --- helpers ---------------------------------------------------------------
 
+// TestEmptyTextBlocksAreStripped covers the shape the API rejects outright.
+//
+// An assistant turn with no text and a tool call is described by a message
+// whose text block is empty. Sent verbatim it serialises as `{"type":""}` and
+// the API fails the whole request, with an error that says nothing about the
+// empty string that caused it.
+func TestEmptyTextBlocksAreStripped(t *testing.T) {
+	var body map[string]any
+	c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		fmt.Fprint(w, textStream("ok"))
+	})
+
+	req := provider.Request{
+		Model: "test-model",
+		Messages: []provider.Message{
+			{Role: provider.RoleUser, Blocks: []provider.Block{{Kind: provider.BlockText, Text: "go"}}},
+			{Role: provider.RoleAssistant, Blocks: []provider.Block{
+				{Kind: provider.BlockText, Text: ""}, // no prose this turn
+				{Kind: provider.BlockToolUse, ToolUseID: "toolu_1", ToolName: "Read", Input: json.RawMessage(`{}`)},
+			}},
+			{Role: provider.RoleUser, Blocks: []provider.Block{
+				{Kind: provider.BlockToolResult, ToolUseID: "toolu_1", Text: "contents"},
+			}},
+		},
+	}
+	if _, err := collect(c.Stream(context.Background(), req)); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, _ := body["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatalf("sent %d messages, want 3", len(msgs))
+	}
+	assistant, _ := msgs[1].(map[string]any)
+	blocks, _ := assistant["content"].([]any)
+	if len(blocks) != 1 {
+		t.Fatalf("assistant content = %v, want just the tool_use block", blocks)
+	}
+	got := blocks[0].(map[string]any)
+	if got["type"] != "tool_use" {
+		t.Errorf("block type = %v, want tool_use", got["type"])
+	}
+	if id, _ := got["id"].(string); id != "toolu_1" {
+		t.Errorf("the wrong block survived: %v", got)
+	}
+}
+
+// TestMessageWithOnlyEmptyTextIsRejected checks the other half: stripping must
+// leave a visible error rather than an empty content array, which the API also
+// refuses and which would look like a client bug much further from the cause.
+func TestMessageWithOnlyEmptyTextIsRejected(t *testing.T) {
+	c, err := NewClient(provider.Config{Model: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.encodeRequest(provider.Request{
+		Model: "m",
+		Messages: []provider.Message{
+			{Role: provider.RoleAssistant, Blocks: []provider.Block{{Kind: provider.BlockText, Text: ""}}},
+		},
+	})
+	if err == nil {
+		t.Fatal("a message with only an empty text block was encoded")
+	}
+	if !strings.Contains(err.Error(), "no content blocks") {
+		t.Errorf("error does not explain itself: %v", err)
+	}
+}
+
 func errorsIs(err, target error) bool {
 	for err != nil {
 		if err == target {
