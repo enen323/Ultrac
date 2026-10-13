@@ -14,6 +14,13 @@
 // tools, frontends) and imports only its contract peer, provider, for the
 // vocabulary the model already speaks (Usage, StopReason). Nothing in this
 // package may import the engine, the tools, or a frontend.
+//
+// Deprecated: this package speaks the Claude Code event vocabulary (10 coarse
+// kinds, end_turn-style stop reasons). It is replaced by internal/ai (the 12
+// fine-grained assistant events, contract C2) and internal/agent (the agent
+// event union, contract C3) — see docs/pi-core-harness-plan.md §2.4. It still
+// compiles and serves the existing engine during the migration; it is
+// scheduled for deletion in phase P7. New code must not import it.
 package event
 
 import (

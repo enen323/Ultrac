@@ -13,6 +13,15 @@
 // package never imports the policy layer. That mirrors the TypeScript
 // signature, which already took a canUseTool callback as its third argument —
 // the coupling was avoided there first, and this keeps it that way.
+//
+// Deprecated: Tool[In]'s 12 predicates (IsReadOnly, IsDestructive,
+// IsOpenWorld, …) exist to serve the permission layer and UI folding, both of
+// which this project is removing: the replacement is agent.AgentTool[In] with
+// Execute/ExecutionMode only (contract C3) — see docs/pi-core-harness-plan.md
+// §2.4 and §4.3. The typed-generic + erasure pattern itself survives there
+// (agent.Erase). This package still compiles and serves the existing engine
+// during the migration; it is scheduled for deletion in phase P7. New code
+// must not import it.
 package tool
 
 import (

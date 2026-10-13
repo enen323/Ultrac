@@ -12,6 +12,13 @@
 // Part of the contract layer. It imports nothing from ultrac. Concrete
 // implementations live in internal/llm/<vendor>, which import this package and
 // never the other way round.
+//
+// Deprecated: this package is the Claude Code-shaped contract (Request.System,
+// coarse Chunk events, end_turn-style stop reasons). It is replaced by
+// internal/ai, which freezes the pi harness contract (C1 message types, C2
+// streaming events) — see docs/pi-core-harness-plan.md §2.4. It still
+// compiles and serves the existing engine during the migration; it is
+// scheduled for deletion in phase P7. New code must not import it.
 package provider
 
 import (
