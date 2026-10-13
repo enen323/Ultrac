@@ -4,6 +4,7 @@ dist
 .env
 .ultrac/settings.local.json
 .claude/settings.local.json
+docs
 
 # Go engine (Phase 1 skeleton)
 /bin/
