@@ -170,7 +170,7 @@ func (b ContentBlock) MarshalJSON() ([]byte, error) {
 			args = map[string]any{}
 		}
 		return json.Marshal(toolCallWire{
-			Type: string(BlockImage), ID: b.ID, Name: b.Name, Arguments: args,
+			Type: string(BlockToolCall), ID: b.ID, Name: b.Name, Arguments: args,
 			ThoughtSignature: b.ThoughtSignature, Namespace: b.Namespace,
 		})
 	default:
