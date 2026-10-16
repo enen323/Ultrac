@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -637,23 +638,33 @@ func TestConcurrentAppendsProduceWholeLines(t *testing.T) {
 
 	const writers, perWriter = 8, 25
 	var wg sync.WaitGroup
+	var appendErrs atomic.Int64
 	for w := range writers {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
 			for i := range perWriter {
-				_ = s.Append(path, &Entry{
+				// The error is asserted, not discarded: a swallowed append
+				// error is exactly how a concurrent-create "Access is denied"
+				// on Windows used to lose transcript lines invisibly.
+				if err := s.Append(path, &Entry{
 					Type:        EntryUser,
 					UUID:        NewUUID(),
 					Timestamp:   NowISO(),
 					SessionID:   sessionID,
 					IsSidechain: w%2 == 1,
 					Message:     userMessage{Role: "user", Content: fmt.Sprintf("w%d-%d", w, i)},
-				})
+				}); err != nil {
+					appendErrs.Add(1)
+					t.Errorf("append w%d-%d: %v", w, i, err)
+				}
 			}
 		}(w)
 	}
 	wg.Wait()
+	if n := appendErrs.Load(); n > 0 {
+		t.Errorf("%d append(s) failed", n)
+	}
 	if err := s.Flush(path); err != nil {
 		t.Fatal(err)
 	}
