@@ -28,8 +28,15 @@ const EnvProviderManagedByHost = "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST"
 // back to anything useful.
 const EnvGitBashPath = "CLAUDE_CODE_GIT_BASH_PATH"
 
-// EnvConfigDir relocates the user configuration directory. Tests set it to a
-// temp directory; a portable install may use it to avoid touching the profile.
+// EnvConfigDir relocates the user configuration directory: it moves both the
+// settings files (~/.ultrac/settings.json and the project ones) and the
+// sessions directory (~/.ultrac/sessions). Tests set it to a temp directory; a
+// portable install may use it to avoid touching the profile.
+//
+// P4 briefly added PI_CODING_AGENT_DIR / PI_CODING_AGENT_SESSION_DIR here to
+// mirror pi's knobs. They were removed on 2026-10-16: Ultrac is its own
+// project now, not a pi installation, and one well-known override beats two
+// half-mirrored ones.
 const EnvConfigDir = "ULTRAC_CONFIG_DIR"
 
 // EnvManagedSettingsPath overrides the managed settings directory. The

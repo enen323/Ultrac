@@ -3,10 +3,23 @@
 // # Why the key names matter
 //
 // Every constant in this package is a name the original TypeScript
-// implementation read. They are not free to rename: ~/.ultrac/settings.json
-// already contains them, and during the migration both implementations read
-// the same file. A rename here would look like a clean-up and behave like a
-// configuration outage.
+// implementation read. They are not free to rename: during the migration both
+// implementations read the same file. A rename here would look like a clean-up
+// and behave like a configuration outage.
+//
+// # Where the files live (since 2026-10-16)
+//
+// Ultrac is its own project, not a pi installation: everything lives under
+// ~/.ultrac. The user layer reads ~/.ultrac/settings.json, the project layer
+// <cwd>/.ultrac/settings.json, and sessions go to ~/.ultrac/sessions/.
+//
+// P4 briefly moved these onto pi's paths (~/.pi/agent/...) because the harness
+// is a port of pi. On 2026-10-16 the user ruled that the port is the product,
+// not a mirror: the goal is a Go rewrite owned outright, so the pi directory
+// layout is gone. What survives from pi is the on-disk data format of session
+// files (header + entry tree) — that is a data layout with tests and fixtures
+// behind it, and renaming directories buys nothing. See
+// docs/pi-core-harness-plan.md §3.5 deviation ①.
 //
 // # Layering
 //
@@ -35,11 +48,10 @@ import (
 )
 
 // DirName is the per-project configuration directory name, relative to a
-// working directory. It is ".ultrac" because this fork renamed the whole
-// claude -> ultrac prefix; see docs/config-loading.md §7.
-//
-// The managed directory below is the deliberate exception and keeps its
-// original name — an enterprise deployment contract, not ours to change.
+// working directory: a project settings file lives at
+// <cwd>/.ultrac/settings.json. The name belongs to this project's own
+// identity; it was briefly ".pi" during P4's pi-layout experiment and moved
+// back on 2026-10-16 (see the package doc).
 const DirName = ".ultrac"
 
 // GlobalFileName is the user-global config file, ~/.ultrac.json.
@@ -104,7 +116,7 @@ func ManagedSettingsFile() string {
 // constant would be captured before the test could set the variable.
 func ConfigHome() string {
 	if dir := os.Getenv(EnvConfigDir); dir != "" {
-		return dir
+		return expandTilde(dir)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -114,6 +126,39 @@ func ConfigHome() string {
 		return DirName
 	}
 	return filepath.Join(home, DirName)
+}
+
+// AgentDir returns the agent configuration directory — the same directory as
+// ConfigHome, under its new-stack name.
+//
+// During P4 this returned ~/.pi/agent (pi's getAgentDir) so the port could
+// share a machine with pi. The 2026-10-16 ruling removed that: Ultrac owns
+// its home, and the two functions now coincide. The name stays because
+// call sites read better for what they configure (the agent's dir, as opposed
+// to any config under it), and because the pi-vocabulary mapping in
+// docs/pi-core-harness-plan.md still refers to it.
+func AgentDir() string { return ConfigHome() }
+
+// SessionsDir returns the directory holding per-project session folders,
+// ~/.ultrac/sessions (pi named this getSessionsDir; the path is ours).
+func SessionsDir() string {
+	return filepath.Join(AgentDir(), "sessions")
+}
+
+// expandTildePath expands a leading ~ so an env override can be written the
+// way a user would type it (pi's expandTildePath, config.ts:588-590).
+func expandTilde(p string) string {
+	if p != "~" && !strings.HasPrefix(p, "~/") && !(runtime.GOOS == "windows" && strings.HasPrefix(p, `~\`)) {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	if p == "~" {
+		return home
+	}
+	return filepath.Join(home, p[2:])
 }
 
 // GlobalFile returns the path of the user-global config file.
