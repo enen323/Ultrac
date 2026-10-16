@@ -43,13 +43,14 @@ live: build
 	./bin/ultrac$(GOEXE) doctor
 	./bin/ultrac$(GOEXE) ask "reply with exactly: GO-T0-OK"
 
-# live-agent is the T1 acceptance path: a real agent loop against the real
-# endpoint. Every prompt here is read-only, so it is safe to run in default
-# permission mode and does not need --dangerously-skip-permissions.
+# live-agent is the P5 acceptance path: the pi-semantics print mode against
+# the real endpoint. Every prompt here is read-only. The json line count is
+# the cheap check that the event stream is a stream: one JSON object per
+# line, opened by the session header.
 live-agent: build
-	./bin/ultrac$(GOEXE) -p "Reply with exactly: T1-OK"
+	./bin/ultrac$(GOEXE) -p "Reply with exactly: P5-OK"
 	./bin/ultrac$(GOEXE) -p "Read go.mod and say the module name in one sentence"
-	./bin/ultrac$(GOEXE) -p "List the Go files under internal/shell" --output-format stream-json | tail -1
+	./bin/ultrac$(GOEXE) --mode json -p "List the Go files under internal/session" | wc -l
 
 clean:
 	rm -rf bin

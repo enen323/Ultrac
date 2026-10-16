@@ -1,20 +1,16 @@
-// Command ultrac is the Go engine's entry point.
+// Command ultrac is the Go engine's entry point — the pi harness port's CLI
+// (docs/pi-core-harness-plan.md §3.6 / §6.3, phase P5).
 //
-// # Status
+// # Modes
 //
-// The T0 foundation is in place — layered settings, transcript storage, the
-// error model, and a streaming Anthropic client — and this binary is where
-// they meet. There is no agent loop yet (that is T1), so the commands here
-// verify the foundation against the same files and the same endpoint the
-// TypeScript implementation uses.
+//	print   `ultrac -p "prompt"` / `ultrac "prompt"` — run and exit
+//	json    `ultrac --mode json "prompt"` — the event stream, one JSON per line
+//	rpc     `--mode rpc` — arrives with P6; rejected until then
 //
-// # Why a diagnostic command and not a stub
-//
-// "The Go side reads the settings differently" and "the Go side cannot read
-// the transcript the TS side wrote" are the two failure modes that would cost
-// the most time to diagnose later. Both are answered in one command, against
-// real data, in under a second. A binary that only prints its version proves
-// the code compiles and nothing else.
+// The diagnostic commands (config / sessions / ask / doctor) predate this
+// phase and still inspect the T0 foundation — the old engine's provider
+// client and transcript store, which live until P7. They are not part of the
+// agent path.
 //
 // # Argument parsing
 //
@@ -32,13 +28,16 @@ import (
 	"strings"
 	"time"
 
+	"ultrac/internal/ai"
+	_ "ultrac/internal/ai/anthropic" // blank import: init() registration
+	_ "ultrac/internal/ai/openai"    // blank import: init() registration
 	"ultrac/internal/config"
 	"ultrac/internal/contract/provider"
-	"ultrac/internal/contract/tool"
 	"ultrac/internal/llm/anthropic"
-	_ "ultrac/internal/llm/anthropic"
 	"ultrac/internal/logging"
 	"ultrac/internal/session"
+	"ultrac/internal/tool"
+	_ "ultrac/internal/tool" // blank import: the 8 tools' init() registrations
 	"ultrac/internal/version"
 )
 
@@ -64,6 +63,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return runAsk(args[1:], stdout, stderr)
 		case "doctor":
 			return runDoctor(args[1:], stdout, stderr)
+		case "probe":
+			return runProbe(args[1:], stdout, stderr)
 		case "help":
 			usage(stdout)
 			return 0
@@ -84,22 +85,36 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, version.String())
 		return 0
 	}
-	if len(args) == 0 {
+	prompt := f.prompt()
+	if prompt == "" && !f.Continue {
+		// No TUI in this port (plan §2.2): a bare `ultrac` has nothing to
+		// do, and saying so beats opening an interactive shell that does
+		// not exist.
 		usage(stdout)
 		return 0
 	}
-	if strings.TrimSpace(f.Prompt) == "" {
-		fmt.Fprintln(stderr, "ultrac: no prompt given.")
-		fmt.Fprintln(stderr, "        Pass a prompt to run the agent, or `ultrac --help` for the flag list.")
+	if prompt == "" && f.Continue {
+		fmt.Fprintln(stderr, "ultrac: --continue needs a prompt to continue with.")
+		fmt.Fprintln(stderr, "        Pass the next instruction, or drop the flag to start a new session.")
 		return 2
 	}
-	return runAgent(f, stdout, stderr)
+	return runPrint(f, stdout, stderr)
 }
 
 func usage(w io.Writer) {
 	usageText(w, version.Get().Version,
-		listOrNone(provider.Kinds()),
-		listOrNone(tool.BuiltinNames()))
+		listOrNone(apiNames()),
+		listOrNone(tool.Names()))
+}
+
+// apiNames lists the registered provider dialects for --help.
+func apiNames() []string {
+	apis := ai.Apis()
+	out := make([]string, len(apis))
+	for i, a := range apis {
+		out[i] = string(a)
+	}
+	return out
 }
 
 // runConfig prints each settings layer and the env they produce.

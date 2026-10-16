@@ -3,55 +3,61 @@ package main
 import (
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 )
 
-// agentFlags is the parsed command line for one agent run.
+// agentFlags is the parsed command line for one run — the pi flag surface
+// (docs/pi-core-harness-plan.md §6.3), not the old Claude-Code-shaped one.
 //
-// Hand-rolled rather than cobra, and deliberately so at this size. The
-// TypeScript CLI has 54 flags and 193 subcommands, which is why it needs a
-// framework; this binary has 12, and the parsing rules that matter here —
-// a repeated --add-dir, a `--flag=value` form, and a prompt that may contain
-// anything at all including things that look like flags after `--` — are
-// easier to get right explicitly than to configure.
+// Hand-rolled rather than cobra, and deliberately so at this size: the
+// parsing rules that matter — a `--flag=value` form, a prompt that may
+// contain anything at all including things that look like flags after `--` —
+// are easier to get right explicitly than to configure.
+//
+// What is gone and why: --permission-mode, --dangerously-skip-permissions
+// and --add-dir belonged to the permission layer, which this port does not
+// have (pi ships no permission system; plan §0.2). --output-format is
+// replaced by --mode, whose "json" value is the event stream rather than the
+// old stream-json dialect.
 type agentFlags struct {
-	Print        bool
-	OutputFormat string
-	Model        string
-	Permission   string
-	AddDirs      []string
-	Settings     string
-	Version      bool
-	Help         bool
+	// Print is the explicit headless switch. A prompt argument implies it
+	// too (pi: resolveAppMode treats a non-TTY or a prompt as print).
+	Print bool
+	// Mode is the output format: "text" (default) or "json".
+	Mode string
+	// Model is the "provider/id" model selection.
+	Model string
+	// API overrides the provider dialect (anthropic-messages,
+	// openai-completions). Empty means the settings convention.
+	API string
+	// CWD overrides the working directory the agent runs in.
+	CWD string
+	// Continue resumes the most recent session for the working directory.
+	Continue bool
+	// NoTranscript skips writing the session file.
+	NoTranscript bool
+	// Debug enables verbose logging on stderr.
+	Debug bool
 
-	// Extensions beyond the eight T1 flags, each of which the agent is
-	// unusable without in some ordinary situation.
-	Prompt             string
-	MaxTurns           int
-	SystemPrompt       string
-	AppendSystemPrompt string
-	SkipPermissions    bool
-	Debug              bool
-	SessionID          string
-	NoTranscript       bool
+	Version bool
+	Help    bool
+
+	// promptParts collects the positional arguments; prompt() joins them.
+	promptParts []string
 }
 
-// outputFormats is the closed set --output-format accepts.
-var outputFormats = []string{"text", "json", "stream-json"}
+// modes is the closed set --mode accepts. "rpc" is pi's third value and
+// lands with P6; rejecting it here rather than silently running text mode is
+// what keeps the flag honest.
+var modes = []string{"text", "json"}
 
 // parseFlags parses argv.
 //
-// Errors are returned rather than printed so the caller decides the exit code.
-// An unknown flag is an error: silently ignoring one is how somebody's
-// --permission-mode ends up not applying and the run does something they did
-// not intend.
+// Errors are returned rather than printed so the caller decides the exit
+// code. An unknown flag is an error: silently ignoring one is how somebody's
+// --model ends up not applying and the run bills the wrong endpoint.
 func parseFlags(args []string) (*agentFlags, error) {
-	f := &agentFlags{
-		OutputFormat: "text",
-		Permission:   "",
-		MaxTurns:     0,
-	}
+	f := &agentFlags{Mode: "text"}
 
 	i := 0
 	rest := false
@@ -59,7 +65,7 @@ func parseFlags(args []string) (*agentFlags, error) {
 		a := args[i]
 
 		if rest {
-			f.Prompt = joinPrompt(f.Prompt, a)
+			f.promptParts = append(f.promptParts, a)
 			continue
 		}
 		if a == "--" {
@@ -67,7 +73,7 @@ func parseFlags(args []string) (*agentFlags, error) {
 			continue
 		}
 		if !strings.HasPrefix(a, "-") || a == "-" {
-			f.Prompt = joinPrompt(f.Prompt, a)
+			f.promptParts = append(f.promptParts, a)
 			continue
 		}
 
@@ -94,86 +100,57 @@ func parseFlags(args []string) (*agentFlags, error) {
 			f.Help = true
 		case "--debug":
 			f.Debug = true
-		case "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions":
-			f.SkipPermissions = true
 		case "--no-transcript":
 			f.NoTranscript = true
-		case "--output-format":
+		case "--mode":
 			v, err := value()
 			if err != nil {
 				return nil, err
 			}
-			if !contains(outputFormats, v) {
-				return nil, fmt.Errorf("--output-format must be one of %s; got %q",
-					strings.Join(outputFormats, ", "), v)
+			if !contains(modes, v) {
+				return nil, fmt.Errorf("--mode must be one of %s; got %q (rpc arrives with the RPC mode)",
+					strings.Join(modes, ", "), v)
 			}
-			f.OutputFormat = v
+			f.Mode = v
 		case "--model":
 			v, err := value()
 			if err != nil {
 				return nil, err
 			}
 			f.Model = v
-		case "--permission-mode":
+		case "--api":
 			v, err := value()
 			if err != nil {
 				return nil, err
 			}
-			f.Permission = v
-		case "--settings":
+			f.API = v
+		case "--cwd":
 			v, err := value()
 			if err != nil {
 				return nil, err
 			}
-			f.Settings = v
-		case "--add-dir":
-			v, err := value()
-			if err != nil {
-				return nil, err
-			}
-			f.AddDirs = append(f.AddDirs, v)
-		case "--max-turns":
-			v, err := value()
-			if err != nil {
-				return nil, err
-			}
-			n, cerr := strconv.Atoi(v)
-			if cerr != nil || n <= 0 {
-				return nil, fmt.Errorf("--max-turns must be a positive integer; got %q", v)
-			}
-			f.MaxTurns = n
-		case "--system-prompt":
-			v, err := value()
-			if err != nil {
-				return nil, err
-			}
-			f.SystemPrompt = v
-		case "--append-system-prompt":
-			v, err := value()
-			if err != nil {
-				return nil, err
-			}
-			f.AppendSystemPrompt = v
-		case "--session-id":
-			v, err := value()
-			if err != nil {
-				return nil, err
-			}
-			f.SessionID = v
+			f.CWD = v
+		case "--continue", "-c":
+			f.Continue = true
 		default:
 			return nil, fmt.Errorf("unknown flag %q", name)
 		}
 	}
-
-	if f.SkipPermissions {
-		// --dangerously-skip-permissions is a mode, not a separate switch, so
-		// it is expressed as one. Two ways to say the same thing would drift.
-		if f.Permission != "" && f.Permission != "bypassPermissions" {
-			return nil, fmt.Errorf("--dangerously-skip-permissions conflicts with --permission-mode %s", f.Permission)
-		}
-		f.Permission = "bypassPermissions"
-	}
 	return f, nil
+}
+
+// prompt is the positional argument(s), joined with spaces. It lives outside
+// parseFlags' switch so the parser stays a parser; the run layer decides
+// whether an empty prompt is an error.
+func (f *agentFlags) prompt() string {
+	return strings.TrimSpace(strings.Join(f.promptParts, " "))
+}
+
+// setPrompt replaces the positional arguments with one prompt. It exists for
+// tests and future callers that build flags programmatically; the parser
+// appends to promptParts instead.
+func (f *agentFlags) setPrompt(text string) {
+	f.promptParts = []string{text}
 }
 
 // splitFlag separates `--flag=value` into its parts.
@@ -182,13 +159,6 @@ func splitFlag(arg string) (name, value string, hasValue bool) {
 		return arg[:i], arg[i+1:], true
 	}
 	return arg, "", false
-}
-
-func joinPrompt(existing, part string) string {
-	if existing == "" {
-		return part
-	}
-	return existing + " " + part
 }
 
 func contains(list []string, s string) bool {
@@ -201,10 +171,10 @@ func contains(list []string, s string) bool {
 }
 
 // usageText is the --help output.
-func usageText(w io.Writer, version, providers, tools string) {
-	fmt.Fprintf(w, "ultrac %s — Go engine\n\n", version)
+func usageText(w io.Writer, version, apis, tools string) {
+	fmt.Fprintf(w, "ultrac %s — Go engine (pi harness port)\n\n", version)
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  ultrac [flags] [prompt]       run the agent on a prompt")
+	fmt.Fprintln(w, "  ultrac [flags] [prompt]       run the agent on a prompt and exit")
 	fmt.Fprintln(w, "  ultrac <command> [args]       run a diagnostic command")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
@@ -212,25 +182,20 @@ func usageText(w io.Writer, version, providers, tools string) {
 	fmt.Fprintln(w, "  sessions [dir]      list transcripts for a directory (default: cwd)")
 	fmt.Fprintln(w, "  ask <prompt>        stream one completion without tools")
 	fmt.Fprintln(w, "  doctor              check the foundation end to end")
+	fmt.Fprintln(w, "  probe               stream one real request and print the event sequence")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Flags:")
-	fmt.Fprintln(w, "  -p, --print                  run headless and exit (implied by a prompt)")
-	fmt.Fprintln(w, "      --output-format FORMAT   text (default) | json | stream-json")
-	fmt.Fprintln(w, "      --model MODEL            override the configured model")
-	fmt.Fprintln(w, "      --permission-mode MODE   default | acceptEdits | plan | bypassPermissions | dontAsk")
-	fmt.Fprintln(w, "      --add-dir DIR            grant access to another directory (repeatable)")
-	fmt.Fprintln(w, "      --settings PATH          load an extra settings file at flag precedence")
-	fmt.Fprintln(w, "      --max-turns N            stop after N assistant turns")
-	fmt.Fprintln(w, "      --system-prompt TEXT     replace the built-in system prompt")
-	fmt.Fprintln(w, "      --append-system-prompt TEXT  append to the system prompt")
-	fmt.Fprintln(w, "      --session-id ID          use a specific session id")
-	fmt.Fprintln(w, "      --no-transcript          do not write a transcript")
-	fmt.Fprintln(w, "      --dangerously-skip-permissions")
-	fmt.Fprintln(w, "                               approve every tool call that no deny rule forbids")
+	fmt.Fprintln(w, "  -p, --print                  non-interactive: process the prompt and exit")
+	fmt.Fprintln(w, "      --mode MODE              output format: text (default) | json")
+	fmt.Fprintln(w, "      --model PROVIDER/ID      model selection (e.g. deepseek/deepseek-chat)")
+	fmt.Fprintln(w, "      --api DIALECT            override the provider dialect (anthropic-messages | openai-completions)")
+	fmt.Fprintln(w, "      --cwd DIR                run in another directory")
+	fmt.Fprintln(w, "  -c, --continue               continue the most recent session for the directory")
+	fmt.Fprintln(w, "      --no-transcript          do not write a session file")
 	fmt.Fprintln(w, "      --debug                  verbose logging on stderr")
 	fmt.Fprintln(w, "  -v, --version                print the version")
 	fmt.Fprintln(w, "  -h, --help                   print this help")
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  provider kinds: %s\n", providers)
+	fmt.Fprintf(w, "  provider dialects: %s\n", apis)
 	fmt.Fprintf(w, "  built-in tools: %s\n", tools)
 }
