@@ -222,15 +222,22 @@ func (t *translator) consume(raw []byte, push func(ai.AssistantEvent)) error {
 		b := t.openBlock(ev.Index, cb.Type)
 		switch cb.Type {
 		case "text":
-			// The text in a content_block_start is ignored on purpose. The
-			// API repeats the same text in the following delta, so honouring
-			// both would double every first word.
-			t.out.Content = append(t.out.Content, ai.TextBlock(""))
+			// Seed from content_block_start, exactly as pi does
+			// (anthropic-messages.ts:696-703). The first-party API sends an
+			// empty string here and streams the text as deltas, so seeding
+			// is a no-op there; Anthropic-compatible endpoints exist that
+			// put the whole text in the start event and send no deltas
+			// (DeepSeek's /anthropic did exactly that for a thinking
+			// block), and ignoring the start text produced an empty block
+			// the endpoint then refused to replay.
+			b.text.WriteString(cb.Text)
+			t.out.Content = append(t.out.Content, ai.TextBlock(cb.Text))
 			b.position = len(t.out.Content) - 1
 			push(ai.EvTextStart{ContentIndex: b.position, Partial: t.snapshot()})
 		case "thinking", "redacted_thinking":
 			block := ai.ContentBlock{
 				Type:              ai.BlockThinking,
+				Thinking:          cb.Thinking,
 				ThinkingSignature: cb.Signature,
 				Redacted:          cb.Type == "redacted_thinking",
 			}
@@ -240,6 +247,10 @@ func (t *translator) consume(raw []byte, push func(ai.AssistantEvent)) error {
 				block.ThinkingSignature = cb.Data
 				block.Thinking = "[Reasoning redacted]"
 			}
+			// Seed the accumulator from the start event too: deltas append
+			// to it (pi: anthropic-messages.ts:704-715), so a response that
+			// arrives whole in content_block_start keeps its text.
+			b.thinking.WriteString(block.Thinking)
 			t.out.Content = append(t.out.Content, block)
 			b.position = len(t.out.Content) - 1
 			push(ai.EvThinkingStart{ContentIndex: b.position, Partial: t.snapshot()})

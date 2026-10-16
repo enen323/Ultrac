@@ -343,11 +343,15 @@ func TestToolCallOnlyMaterialisesAtBlockStop(t *testing.T) {
 }
 
 func TestTextInContentBlockStartIsNotDuplicated(t *testing.T) {
+	// The first-party API opens a text block with an empty string and
+	// streams the text as deltas; seeding from the start event is a no-op
+	// there, and the delta's text arrives exactly once (pi:
+	// anthropic-messages.ts:696-703 seeds and appends — a proxy that
+	// repeated the start text in a delta would be malformed, and matching
+	// pi matters more than defending against it).
 	var b strings.Builder
 	b.WriteString(sse("message_start", `{"type":"message_start","message":{"id":"m","model":"test-model","usage":{"input_tokens":1,"output_tokens":0}}}`))
-	// A proxy that fills the text at block start and also sends the delta
-	// would double the first word if both were honoured.
-	b.WriteString(sse("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"hello"}}`))
+	b.WriteString(sse("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`))
 	b.WriteString(sse("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello world"}}`))
 	b.WriteString(sse("content_block_stop", `{"type":"content_block_stop","index":0}`))
 	b.WriteString(sse("message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`))
@@ -360,6 +364,51 @@ func TestTextInContentBlockStartIsNotDuplicated(t *testing.T) {
 	done := got.events[len(got.events)-1].(ai.EvDone)
 	if ai.MessageText(done.Message) != "hello world" {
 		t.Errorf("text = %q, want the delta's text once", ai.MessageText(done.Message))
+	}
+}
+
+// TestBlockTextOnlyInContentBlockStart is the DeepSeek-/anthropic shape that
+// broke P5's first live tool run: the whole block text arrives in
+// content_block_start and NO delta follows. Ignoring the start text produced
+// an empty thinking block, which the endpoint then refused to replay
+// ("missing field `thinking`").
+func TestBlockTextOnlyInContentBlockStart(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(sse("message_start", `{"type":"message_start","message":{"id":"m","model":"test-model","usage":{"input_tokens":1,"output_tokens":0}}}`))
+	// Thinking arrives whole at block start, with its signature.
+	b.WriteString(sse("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"let me read the file","signature":"sig-1"}}`))
+	b.WriteString(sse("content_block_stop", `{"type":"content_block_stop","index":0}`))
+	// Text likewise, and then a tool call with its input in the start event.
+	b.WriteString(sse("content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"text","text":"reading"}}`))
+	b.WriteString(sse("content_block_stop", `{"type":"content_block_stop","index":1}`))
+	b.WriteString(sse("content_block_start", `{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"call_1","name":"read","input":{"path":"go.mod"}}}`))
+	b.WriteString(sse("content_block_stop", `{"type":"content_block_stop","index":2}`))
+	b.WriteString(sse("message_delta", `{"type":"message_delta","delta":{"stop_reason":"tool_use"}}`))
+	b.WriteString(sse("message_stop", `{"type":"message_stop"}`))
+
+	client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, b.String())
+	})
+	got := drain(t, client.stream(context.Background(), testModel(), simpleTranscript("x"), Options{}))
+	done := got.events[len(got.events)-1].(ai.EvDone)
+	msg := done.Message
+	if len(msg.Content) != 3 {
+		t.Fatalf("content has %d blocks, want 3: %+v", len(msg.Content), msg.Content)
+	}
+	if msg.Content[0].Type != ai.BlockThinking || msg.Content[0].Thinking != "let me read the file" {
+		t.Errorf("thinking block = %+v, want the start event's text", msg.Content[0])
+	}
+	if msg.Content[0].ThinkingSignature != "sig-1" {
+		t.Errorf("thinking signature = %q, want sig-1", msg.Content[0].ThinkingSignature)
+	}
+	if msg.Content[1].Type != ai.BlockText || msg.Content[1].Text != "reading" {
+		t.Errorf("text block = %+v, want the start event's text", msg.Content[1])
+	}
+	if msg.Content[2].Type != ai.BlockToolCall || msg.Content[2].Arguments["path"] != "go.mod" {
+		t.Errorf("tool call = %+v, want the start event's arguments", msg.Content[2])
+	}
+	if msg.StopReason != ai.StopToolUse {
+		t.Errorf("stopReason = %q, want toolUse", msg.StopReason)
 	}
 }
 
@@ -463,6 +512,54 @@ func TestThinkingWithoutSignatureDegradesToText(t *testing.T) {
 	}
 	if strings.Contains(string(body), `"type":"thinking"`) {
 		t.Errorf("signature-less thinking block was sent as thinking: %s", body)
+	}
+}
+
+// TestEmptyThinkingWithSignatureIsSkipped is the P5 live-run regression: a
+// signature over empty reasoning (a stream cut before the first thinking
+// delta) was replayed verbatim and DeepSeek's endpoint rejected the whole
+// request with "missing field `thinking`". The block carries nothing, so it
+// is dropped whatever the signature says.
+func TestEmptyThinkingWithSignatureIsSkipped(t *testing.T) {
+	tc := ai.NormalizeContext(ai.Context{Messages: []ai.Message{{
+		Role: ai.RoleAssistant,
+		Content: []ai.ContentBlock{
+			{Type: ai.BlockThinking, Thinking: "", ThinkingSignature: "sig-over-nothing"},
+			{Type: ai.BlockToolCall, ID: "call_1", Name: "read", Arguments: map[string]any{"path": "go.mod"}},
+		},
+	}}})
+	client, err := New(Config{Model: testModel()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := client.encodeRequest(testModel(), tc, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), `"type":"thinking"`) {
+		t.Errorf("empty thinking block was sent as thinking: %s", body)
+	}
+	if !strings.Contains(string(body), `"call_1"`) {
+		t.Errorf("the tool call that followed the empty block was lost: %s", body)
+	}
+}
+
+// TestEmptyThinkingAloneIsAnError: a message whose only block was the empty
+// thinking would become a content-less message the API rejects with a
+// message that says nothing about the real cause, so it fails here instead.
+func TestEmptyThinkingAloneIsAnError(t *testing.T) {
+	tc := ai.NormalizeContext(ai.Context{Messages: []ai.Message{{
+		Role: ai.RoleAssistant,
+		Content: []ai.ContentBlock{
+			{Type: ai.BlockThinking, Thinking: "  ", ThinkingSignature: "sig"},
+		},
+	}}})
+	client, err := New(Config{Model: testModel()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.encodeRequest(testModel(), tc, Options{}); err == nil {
+		t.Error("expected an error for a message whose only block is empty thinking")
 	}
 }
 

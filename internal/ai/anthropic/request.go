@@ -399,16 +399,25 @@ func encodeBlock(b ai.ContentBlock) (wireBlock, error) {
 		// signature (aborted stream, hand-built transcript) degrades to
 		// plain text instead of poisoning the turn — pi does the same
 		// (anthropic-messages.ts:1419-1431).
+		//
+		// The mirror case — a signature over EMPTY reasoning — is an
+		// artifact, not content: it can only come from a stream that was
+		// cut before the first thinking delta (the P5 live run hit exactly
+		// that when DeepSeek's endpoint put the whole thinking text in
+		// content_block_start). Sending it makes Anthropic-compatible
+		// endpoints reject the request ("missing field `thinking`"),
+		// and dropping it loses nothing, so it is skipped whatever the
+		// signature says.
 		if b.Redacted {
 			if b.ThinkingSignature == "" {
 				return wireBlock{}, fmt.Errorf("redacted thinking block has no payload")
 			}
 			return wireBlock{Type: "redacted_thinking", Data: b.ThinkingSignature}, nil
 		}
+		if strings.TrimSpace(b.Thinking) == "" {
+			return wireBlock{}, nil
+		}
 		if b.ThinkingSignature == "" {
-			if strings.TrimSpace(b.Thinking) == "" {
-				return wireBlock{}, nil
-			}
 			return wireBlock{Type: "text", Text: b.Thinking}, nil
 		}
 		return wireBlock{Type: "thinking", Thinking: b.Thinking, Signature: b.ThinkingSignature}, nil
