@@ -151,14 +151,23 @@ func marshalEntry(e *Entry) ([]byte, error) {
 	return json.Marshal(merged)
 }
 
+// openForWrite returns the handle for path, opening it on first use.
+//
+// The whole check-open-register sequence runs under the mutex, and that is
+// load-bearing on Windows: two goroutines racing to create the same file with
+// O_CREATE intermittently gets "Access is denied" from CreateFile (one
+// creator wins, the rest are refused), and the previous double-checked
+// version performed the open outside the lock, so every loser silently
+// dropped its append — the caller ignores the error and a transcript line
+// vanishes. The critical section covers only the first open per path; steady
+// state is a map lookup.
 func (s *Store) openForWrite(path string) (*handle, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if h, ok := s.handles[path]; ok {
-		s.mu.Unlock()
 		return h, nil
 	}
-	s.mu.Unlock()
-
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("session: create directory for %s: %w", path, err)
 	}
@@ -168,15 +177,6 @@ func (s *Store) openForWrite(path string) (*handle, error) {
 	}
 
 	h := &handle{f: f, w: bufio.NewWriterSize(f, 64*1024), path: path}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// Another goroutine may have opened the same path while we were creating
-	// the directory. Keep the first one; close ours so the fd does not leak.
-	if existing, ok := s.handles[path]; ok {
-		_ = f.Close()
-		return existing, nil
-	}
 	s.handles[path] = h
 	return h, nil
 }
