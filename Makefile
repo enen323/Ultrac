@@ -1,8 +1,7 @@
 # Build entry points for the Go engine.
 #
-# The TypeScript tree still builds with bun (`bun run build`); these targets
-# only cover cmd/ and internal/. Make is a convenience, not a requirement —
-# every target is a plain `go` invocation you can run by hand.
+# Make is a convenience, not a requirement — every target is a plain `go`
+# invocation you can run by hand.
 
 GO      ?= go
 GOEXE   := $(shell $(GO) env GOEXE)
@@ -18,7 +17,7 @@ LDFLAGS := -s -w \
 	-X ultrac/internal/version.GitCommit=$(COMMIT) \
 	-X ultrac/internal/version.BuildTimeUTC=$(BUILT)
 
-.PHONY: build vet test fmt clean check live live-agent
+.PHONY: build vet test fmt clean check live-agent
 
 build:
 	CGO_ENABLED=0 $(GO) build -ldflags "$(LDFLAGS)" -o bin/ultrac$(GOEXE) ./cmd/ultrac
@@ -32,21 +31,17 @@ test:
 fmt:
 	$(GO) fmt ./cmd/... ./internal/...
 
-# The local quality gate. Scoped to ./cmd and ./internal on purpose: `./...`
-# walks node_modules (31k files) and gets killed before it reaches our code.
+# The local quality gate.
 check: vet test
 
-# live runs the checks that hit the real endpoint, using whatever provider
-# ~/.ultrac/settings.json configures. Separate from `test` because it spends
-# the user's quota and needs network.
-live: build
-	./bin/ultrac$(GOEXE) doctor
-	./bin/ultrac$(GOEXE) ask "reply with exactly: GO-T0-OK"
-
-# live-agent is the P5 acceptance path: the pi-semantics print mode against
-# the real endpoint. Every prompt here is read-only. The json line count is
-# the cheap check that the event stream is a stream: one JSON object per
-# line, opened by the session header.
+# live-agent is the real-endpoint acceptance path: the pi-semantics print mode
+# against whatever provider ~/.ultrac/settings.json configures. Separate from
+# `test` because it spends the user's quota and needs network. Every prompt
+# here is read-only. The json line count is the cheap check that the event
+# stream is a stream: one JSON object per line, opened by the session header.
+#
+# The T0-era `live` target (doctor + ask) died with those commands in P7;
+# `ultrac probe` covers the endpoint check now.
 live-agent: build
 	./bin/ultrac$(GOEXE) -p "Reply with exactly: P5-OK"
 	./bin/ultrac$(GOEXE) -p "Read go.mod and say the module name in one sentence"

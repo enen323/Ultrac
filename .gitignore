@@ -1,12 +1,9 @@
 /eli5/
-node_modules
-dist
 .env
 .ultrac/settings.local.json
 .claude/settings.local.json
-docs
 
-# Go engine (Phase 1 skeleton)
+# Local build output and dev tools (not tracked)
 /bin/
 *.exe
 *.test
