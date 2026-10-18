@@ -345,6 +345,48 @@ func (a *Agent) SetFollowUpMode(mode QueueMode) {
 	a.followUpQueue.mode = mode
 }
 
+// SetModel replaces the active model for future turns.
+//
+// pi mutates agent.state.model directly from the session layer
+// (agent-session.ts:2509, setModel); Go has no shared single-threaded
+// mutation, so the assignment takes the state lock. The caller owns the
+// validation and the persistence (a model_change entry) — the agent only
+// holds the value.
+func (a *Agent) SetModel(model ai.Model) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.state.model = model
+}
+
+// SetThinkingLevel replaces the requested reasoning level for future turns.
+//
+// Same shape as SetModel: pi assigns agent.state.thinkingLevel from the
+// session (agent-session.ts:2645) after clamping against the model's
+// available levels, which is the caller's job here.
+func (a *Agent) SetThinkingLevel(level ThinkingLevel) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.state.thinkingLevel = level
+}
+
+// SteeringMessages previews the queued steering messages without consuming
+// them. P6's RPC clear_queue and get_state need the two queues separately —
+// PeekQueuedMessages merges them in drain order, which cannot say which
+// queue a message came from.
+func (a *Agent) SteeringMessages() []ai.Message {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]ai.Message(nil), a.steeringQueue.messages...)
+}
+
+// FollowUpMessages previews the queued follow-up messages without consuming
+// them (see SteeringMessages).
+func (a *Agent) FollowUpMessages() []ai.Message {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]ai.Message(nil), a.followUpQueue.messages...)
+}
+
 // Steer queues a message to be injected after the current assistant turn's
 // tool calls finish.
 //

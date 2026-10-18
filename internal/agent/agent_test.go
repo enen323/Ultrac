@@ -714,3 +714,63 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	}
 	t.Fatal("condition not met within timeout")
 }
+
+// TestAgentSetModelAndThinkingLevel covers the P6 session-layer mutations:
+// the RPC set_model / set_thinking_level commands reach the agent through
+// these two setters (pi's session assigns state.model / state.thinkingLevel
+// directly, agent-session.ts:2509 and :2645).
+func TestAgentSetModelAndThinkingLevel(t *testing.T) {
+	fake := &fakeProvider{scripts: [][]ai.AssistantEvent{textScript("x", ai.StopStop)}}
+	agent := newTestAgent(fake)
+
+	swapped := fakeModel()
+	swapped.ID = "swapped-model"
+	agent.SetModel(swapped)
+	if got := agent.State().Model; got.ID != "swapped-model" {
+		t.Errorf("Model = %q, want swapped-model", got.ID)
+	}
+
+	agent.SetThinkingLevel(ThinkHigh)
+	if got := agent.State().ThinkingLevel; got != ThinkHigh {
+		t.Errorf("ThinkingLevel = %q, want high", got)
+	}
+
+	// The setters touch future turns only: the transcript keeps exactly the
+	// seeded system prompt, nothing else.
+	msgs := agent.State().Messages
+	if len(msgs) != 1 || msgs[0].Role != ai.RoleSystem {
+		t.Errorf("messages = %+v, want the seeded system message alone", msgs)
+	}
+}
+
+// TestAgentPerQueuePeeking covers the two previews P6's clear_queue and
+// get_state need: PeekQueuedMessages merges the queues in drain order,
+// which cannot say which queue a message came from.
+func TestAgentPerQueuePeeking(t *testing.T) {
+	fake := &fakeProvider{}
+	agent := newTestAgent(fake)
+
+	agent.Steer(userMessage("s1"))
+	agent.Steer(userMessage("s2"))
+	agent.FollowUp(userMessage("f1"))
+
+	steering := agent.SteeringMessages()
+	if len(steering) != 2 || ai.MessageText(steering[0]) != "s1" || ai.MessageText(steering[1]) != "s2" {
+		t.Errorf("SteeringMessages = %v, want [s1 s2]", steering)
+	}
+	followUp := agent.FollowUpMessages()
+	if len(followUp) != 1 || ai.MessageText(followUp[0]) != "f1" {
+		t.Errorf("FollowUpMessages = %v, want [f1]", followUp)
+	}
+
+	// Previews do not consume.
+	if !agent.HasQueuedMessages() {
+		t.Error("peeking must not drain the queues")
+	}
+
+	// The preview is a copy: mutating it cannot corrupt the queue.
+	steering[0] = userMessage("tampered")
+	if ai.MessageText(agent.SteeringMessages()[0]) != "s1" {
+		t.Error("the preview must be a copy, not the live queue")
+	}
+}
