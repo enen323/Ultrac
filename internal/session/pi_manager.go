@@ -110,6 +110,24 @@ func CreateSession(cwd string) *SessionManager {
 	return m
 }
 
+// CreateSessionWithParent starts a new session for cwd whose header records
+// parentSession — the fork point the new session grows from.
+//
+// pi: SessionManager.create followed by newSession({parentSession})
+// (agent-session-runtime.ts:239-243), which is how the RPC new_session
+// command links a child transcript to its parent. The header field itself
+// has been part of the format since v1 (pi_format.go, Header.ParentSession).
+func CreateSessionWithParent(cwd, parentSession string) *SessionManager {
+	m := CreateSession(cwd)
+	// newSession rebuilds the header from scratch (dropping any earlier
+	// parent), so the parent attaches after the reset. The file name is
+	// derived from the header timestamp and id, not the parent, so nothing
+	// about the path changes.
+	m.newSession("")
+	m.header.ParentSession = parentSession
+	return m
+}
+
 // OpenSession loads an existing session file.
 //
 // pi: SessionManager.open (session-manager.ts:1766-1786). A non-empty file

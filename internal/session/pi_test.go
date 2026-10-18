@@ -837,3 +837,37 @@ func indexEntries(entries []*SessionEntry) map[string]*SessionEntry {
 }
 
 func strPtr(s string) *string { return &s }
+
+func TestCreateSessionWithParentRecordsParent(t *testing.T) {
+	setupAgentDir(t)
+	parent := CreateSession(`D:/repo`)
+	if _, err := parent.AppendMessage(userMsg("parent turn")); err != nil {
+		t.Fatal(err)
+	}
+
+	// P6's RPC new_session command: a child session whose header names the
+	// parent it grew from (pi: agent-session-runtime.ts:239-243).
+	child := CreateSessionWithParent(`D:/repo`, parent.SessionID())
+	if child.SessionID() == parent.SessionID() {
+		t.Fatal("the child must be its own session")
+	}
+	if child.Header().ParentSession != parent.SessionID() {
+		t.Errorf("ParentSession = %q, want %q", child.Header().ParentSession, parent.SessionID())
+	}
+
+	// The parent survives the child's creation untouched, and the two are
+	// distinct files.
+	if parent.Header().ParentSession != "" {
+		t.Errorf("the parent's header must not gain a parent: %q", parent.Header().ParentSession)
+	}
+	if child.SessionFile() == parent.SessionFile() {
+		t.Error("parent and child must not share a file")
+	}
+
+	// An empty parent behaves exactly like CreateSession (no field on the
+	// wire, not an empty string).
+	plain := CreateSessionWithParent(`D:/repo`, "")
+	if plain.Header().ParentSession != "" {
+		t.Errorf("ParentSession = %q, want empty", plain.Header().ParentSession)
+	}
+}
