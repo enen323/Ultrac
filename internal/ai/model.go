@@ -177,6 +177,96 @@ type SamplingParamsByThinkingLevel map[ModelThinkingLevel]SamplingParams
 // pi: packages/ai/src/providers/model-schema.ts:14-15.
 type ThinkingLevelMap map[ModelThinkingLevel]*string
 
+// extendedThinkingLevels is the canonical order every thinking-level
+// decision walks: the support filter, the clamp, and the UI list.
+//
+// pi: packages/ai/src/models.ts:1228 (EXTENDED_THINKING_LEVELS) — the same
+// list as core/defaults.ts THINKING_LEVEL_OPTIONS.
+var extendedThinkingLevels = []ModelThinkingLevel{
+	ModelThinkOff,
+	ModelThinkMinimal,
+	ModelThinkLow,
+	ModelThinkMedium,
+	ModelThinkHigh,
+	ModelThinkXHigh,
+	ModelThinkMax,
+}
+
+// SupportedThinkingLevels lists the levels a model accepts, in canonical
+// order.
+//
+// pi: packages/ai/src/models.ts:1230-1239 (getSupportedThinkingLevels).
+// A non-reasoning model supports only "off". Otherwise every canonical
+// level is supported unless the map marks it unsupported (a nil value),
+// with "xhigh" and "max" requiring an explicit map entry — the two levels
+// providers gate behind opt-in.
+func SupportedThinkingLevels(model Model) []ModelThinkingLevel {
+	if !model.Reasoning {
+		return []ModelThinkingLevel{ModelThinkOff}
+	}
+	out := []ModelThinkingLevel{}
+	for _, level := range extendedThinkingLevels {
+		mapped, present := model.ThinkingLevelMap[level]
+		if present && mapped == nil {
+			continue
+		}
+		if level == ModelThinkXHigh || level == ModelThinkMax {
+			if !present {
+				continue
+			}
+		}
+		out = append(out, level)
+	}
+	return out
+}
+
+// ClampThinkingLevel resolves a requested level against the levels a model
+// supports: an exact match passes through, otherwise the nearest supported
+// level at or above the request wins, then below it, then the first
+// supported level, then "off".
+//
+// pi: packages/ai/src/models.ts:1241-1260 (clampThinkingLevel), with the
+// model lookup already applied by the caller — this takes the supported
+// list so it stays a pure function of its arguments.
+func ClampThinkingLevel(available []ModelThinkingLevel, level ModelThinkingLevel) ModelThinkingLevel {
+	for _, l := range available {
+		if l == level {
+			return level
+		}
+	}
+	requested := -1
+	for i, l := range extendedThinkingLevels {
+		if l == level {
+			requested = i
+			break
+		}
+	}
+	if requested == -1 {
+		if len(available) > 0 {
+			return available[0]
+		}
+		return ModelThinkOff
+	}
+	for i := requested; i < len(extendedThinkingLevels); i++ {
+		for _, l := range available {
+			if l == extendedThinkingLevels[i] {
+				return l
+			}
+		}
+	}
+	for i := requested - 1; i >= 0; i-- {
+		for _, l := range available {
+			if l == extendedThinkingLevels[i] {
+				return l
+			}
+		}
+	}
+	if len(available) > 0 {
+		return available[0]
+	}
+	return ModelThinkOff
+}
+
 // ModelPromptCache holds best-effort cache lifetimes in seconds per retention
 // tier; keys are "short" and "long". A missing tier means unknown.
 //
