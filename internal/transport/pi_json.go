@@ -99,6 +99,23 @@ func (w *PiJSONWriter) WriteEvent(ev agent.AgentEvent) error {
 	return w.writeEventLocked(ev)
 }
 
+// WriteObject writes any value as a single JSON line.
+//
+// This is the RPC response path: responses are not agent events, but they
+// share the stream with them, so they go through the same mutex and the
+// same U+2028/29 escaping as write() — a half-interleaved line is a stream
+// no parser can read, and a protocol that fixed framing in one message kind
+// and not the other is a trap (same reasoning as the two writers in this
+// package, file comment).
+//
+// pi: rpc-mode.ts:60-63 — one output() for responses, events and extension
+// UI requests alike.
+func (w *PiJSONWriter) WriteObject(v any) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.write(v)
+}
+
 func (w *PiJSONWriter) writeEventLocked(ev agent.AgentEvent) error {
 	switch e := ev.(type) {
 	case agent.EvAgentStart:

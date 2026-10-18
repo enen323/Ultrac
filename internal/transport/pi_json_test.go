@@ -405,3 +405,59 @@ func TestPiJSONWriterTurnEndCarriesMessages(t *testing.T) {
 		t.Errorf("toolResult identity = %+v", got.ToolResults[0])
 	}
 }
+
+func TestPiJSONWriterWriteObjectOneLinePerObject(t *testing.T) {
+	// The RPC response path: responses are not agent events but share the
+	// stream with them, so WriteObject applies the same framing rules —
+	// one object per line, U+2028/29 escaped (P6, plan §3.7).
+	var buf bytes.Buffer
+	w := NewPiJSONWriter(&buf)
+	if err := w.WriteObject(map[string]any{"type": "response", "command": "get_state", "success": true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteObject(map[string]any{"type": "response", "error": "line\u2028break"}); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2", len(lines))
+	}
+	if !strings.Contains(lines[1], `\u2028`) {
+		t.Errorf("U+2028 not escaped in a response: %q", lines[1])
+	}
+	var first map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
+		t.Fatalf("response line is not JSON: %v", err)
+	}
+	if first["command"] != "get_state" || first["success"] != true {
+		t.Errorf("first response = %v", first)
+	}
+}
+
+func TestPiJSONWriterEventsAndObjectsShareOneStream(t *testing.T) {
+	// The P6 guarantee in one assertion: an event and a response written
+	// through the same writer land as two whole lines, never interleaved.
+	var buf bytes.Buffer
+	w := NewPiJSONWriter(&buf)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			_ = w.WriteObject(map[string]any{"type": "response", "command": "prompt", "i": i})
+		}
+	}()
+	for i := 0; i < 50; i++ {
+		_ = w.WriteEvent(agent.EvTurnStart{})
+	}
+	<-done
+	lines := strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
+	if len(lines) != 100 {
+		t.Fatalf("got %d lines, want 100", len(lines))
+	}
+	for _, l := range lines {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(l), &m); err != nil {
+			t.Fatalf("line is not whole JSON: %q: %v", l, err)
+		}
+	}
+}
