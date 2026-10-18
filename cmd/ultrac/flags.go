@@ -180,8 +180,6 @@ func usageText(w io.Writer, version, apis, tools string) {
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  config              show the resolved settings stack and effective env")
 	fmt.Fprintln(w, "  sessions [dir]      list transcripts for a directory (default: cwd)")
-	fmt.Fprintln(w, "  ask <prompt>        stream one completion without tools")
-	fmt.Fprintln(w, "  doctor              check the foundation end to end")
 	fmt.Fprintln(w, "  probe               stream one real request and print the event sequence")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Flags:")

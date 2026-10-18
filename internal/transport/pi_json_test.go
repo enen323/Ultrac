@@ -90,6 +90,7 @@ func TestPiJSONWriterEventDiscriminants(t *testing.T) {
 		agent.EvMessageEnd{Message: msg},
 		agent.EvTurnEnd{Message: msg, ToolResults: nil},
 		agent.EvAgentEnd{Messages: []ai.Message{msg}},
+		agent.EvAgentSettled{},
 	}
 	lines := writeEvents(t, events...)
 	want := []string{
@@ -99,6 +100,7 @@ func TestPiJSONWriterEventDiscriminants(t *testing.T) {
 		"message_end",
 		"turn_end",
 		"agent_end",
+		"agent_settled",
 	}
 	if len(lines) != len(want) {
 		t.Fatalf("got %d lines, want %d: %v", len(lines), len(want), lines)
@@ -111,6 +113,18 @@ func TestPiJSONWriterEventDiscriminants(t *testing.T) {
 		if l.Type != w {
 			t.Errorf("line %d type = %q, want %q", i, l.Type, w)
 		}
+	}
+
+	// agent_settled carries the aborted flag (pi: agent-session.ts:203).
+	var settled struct {
+		Type    string `json:"type"`
+		Aborted bool   `json:"aborted"`
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &settled); err != nil {
+		t.Fatalf("last line is not JSON: %v (%q)", err, lines[len(lines)-1])
+	}
+	if settled.Type != "agent_settled" || settled.Aborted {
+		t.Errorf("settled line = %+v, want type agent_settled with aborted false", settled)
 	}
 }
 

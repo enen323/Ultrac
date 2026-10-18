@@ -9,24 +9,17 @@ import (
 	"syscall"
 )
 
-// signalContext returns a context cancelled by SIGINT or SIGTERM.
+// printSignalContext is a context cancelled by SIGINT or SIGTERM, plus the
+// identity of the signal that fired. The print mode maps that identity to an
+// exit code (pi: print-mode.ts:50-66 — 143 for SIGTERM, 129 for SIGHUP), and
+// "which signal" is not recoverable from a bare context cancellation.
 //
 // On Windows there is no SIGTERM from a console close, so os.Interrupt is the
 // signal that matters; SIGTERM is included because `taskkill` sends it and a
 // process that ignores it has to be killed outright, losing any unflushed
-// transcript.
-//
-// Second Ctrl-C is left to the default handler. The usual pattern is "first
-// cancels, second force-quits", and swallowing every signal makes a wedged
-// process unkillable from the keyboard.
-func signalContext() (context.Context, context.CancelFunc) {
-	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-}
-
-// printSignalContext is signalContext plus the identity of the signal that
-// fired. The print mode maps that identity to an exit code (pi:
-// print-mode.ts:50-66 — 143 for SIGTERM, 129 for SIGHUP), and "which signal"
-// is not recoverable from a bare context cancellation.
+// transcript. A second Ctrl-C is left to the default handler: the usual
+// pattern is "first cancels, second force-quits", and swallowing every signal
+// makes a wedged process unkillable from the keyboard.
 //
 // The watcher goroutine exits on the first signal or when stop is called, so
 // a run that finishes without a signal leaves nothing behind.

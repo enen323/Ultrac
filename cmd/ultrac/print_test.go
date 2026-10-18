@@ -288,6 +288,7 @@ func TestPrintJSONModeEventStream(t *testing.T) {
 		"message_end",
 		"turn_end",
 		"agent_end",
+		"agent_settled",
 	}
 	if strings.Join(types, ",") != strings.Join(want, ",") {
 		t.Errorf("event types =\n%s\nwant\n%s", strings.Join(types, "\n"), strings.Join(want, "\n"))

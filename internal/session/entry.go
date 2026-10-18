@@ -20,7 +20,7 @@
 //
 // Part of the capability layer (L2). It imports internal/logging for error
 // types and internal/config for the config directory, both below it. It imports
-// nothing from internal/engine.
+// nothing from the agent or rpc layers.
 package session
 
 import (

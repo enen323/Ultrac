@@ -70,7 +70,7 @@ func TestAgentPromptLifecycle(t *testing.T) {
 		"message_start", "message_end", // toolResult
 		"turn_end", "turn_start",
 		"message_start", "message_update", "message_update", "message_update", "message_end",
-		"turn_end", "agent_end",
+		"turn_end", "agent_end", "agent_settled",
 	)
 
 	state := agent.State()
@@ -432,7 +432,8 @@ func TestAgentContinuePaths(t *testing.T) {
 }
 
 // TestAgentAbortNoLeak is the plan's abort DoD: Abort() mid-tool, the event
-// sequence closes with agent_end, the state settles, and no goroutine leaks.
+// sequence closes with agent_end + agent_settled, the state settles, and no
+// goroutine leaks.
 func TestAgentAbortNoLeak(t *testing.T) {
 	var started int32
 	slow := behaviorTool("slow", toolBehavior{
@@ -473,8 +474,8 @@ func TestAgentAbortNoLeak(t *testing.T) {
 	mu.Lock()
 	got := append([]string(nil), names...)
 	mu.Unlock()
-	if got[len(got)-1] != "agent_end" {
-		t.Errorf("last event = %q, want agent_end (sequence: %v)", got[len(got)-1], got)
+	if len(got) < 2 || got[len(got)-2] != "agent_end" || got[len(got)-1] != "agent_settled" {
+		t.Errorf("last events = %q, want agent_end then agent_settled (sequence: %v)", got[max(0, len(got)-2):], got)
 	}
 
 	state := agent.State()
@@ -623,8 +624,8 @@ func TestAgentListenerErrorFailsRun(t *testing.T) {
 	mu.Lock()
 	got := append([]string(nil), names...)
 	mu.Unlock()
-	if got[len(got)-1] != "agent_end" {
-		t.Errorf("last event = %q, want agent_end (sequence: %v)", got[len(got)-1], got)
+	if len(got) < 2 || got[len(got)-2] != "agent_end" || got[len(got)-1] != "agent_settled" {
+		t.Errorf("last events = %q, want agent_end then agent_settled (sequence: %v)", got[max(0, len(got)-2):], got)
 	}
 	state := agent.State()
 	if !strings.Contains(state.ErrorMessage, "listener exploded") {

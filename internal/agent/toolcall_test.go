@@ -114,7 +114,7 @@ func TestSequentialModeInterleaves(t *testing.T) {
 		"turn_start",
 		"message_start", "message_update", "message_update", "message_update", "message_end",
 		"turn_end",
-		"agent_end",
+		"agent_end", "agent_settled",
 	)
 }
 
@@ -152,7 +152,7 @@ func TestSequentialToolDegradesBatch(t *testing.T) {
 		"turn_start",
 		"message_start", "message_update", "message_update", "message_update", "message_end",
 		"turn_end",
-		"agent_end",
+		"agent_end", "agent_settled",
 	)
 }
 

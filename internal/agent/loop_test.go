@@ -7,7 +7,7 @@ package agent
 // The expected event sequences below are the plan's P2 DoD, written out:
 //
 //	单轮:    agent_start turn_start message_start(message_end) message_start
-//	         message_update* message_end agent_end
+//	         message_update* message_end agent_end agent_settled
 //	多轮工具: … tool_execution_start tool_execution_end message_start
 //	         (message_end) turn_start …
 
@@ -90,7 +90,7 @@ func TestSingleTurnEventSequence(t *testing.T) {
 		"message_update", "message_update", "message_update", // text_start/delta/end
 		"message_end",
 		"turn_end", // the turn closes before the run does
-		"agent_end",
+		"agent_end", "agent_settled",
 	)
 
 	if len(messages) != 2 {
@@ -209,7 +209,7 @@ func TestMultiTurnToolLoop(t *testing.T) {
 		"turn_start", // second turn
 		"message_start", "message_update", "message_update", "message_update", "message_end",
 		"turn_end",
-		"agent_end",
+		"agent_end", "agent_settled",
 	)
 
 	if readCalls != 1 {
@@ -776,7 +776,7 @@ func TestTransformContextAndConvertToLLM(t *testing.T) {
 }
 
 // TestStreamFailurePropagates checks an error response is a hard exit with
-// turn_end and agent_end.
+// turn_end, agent_end and agent_settled.
 //
 // pi: agent-loop.ts:245-256.
 func TestStreamFailurePropagates(t *testing.T) {
@@ -790,8 +790,8 @@ func TestStreamFailurePropagates(t *testing.T) {
 		t.Fatalf("RunAgentLoop returned %v, want nil (the failure travels as an event)", err)
 	}
 	names := rec.names()
-	if names[len(names)-1] != "agent_end" {
-		t.Errorf("last event = %q, want agent_end", names[len(names)-1])
+	if len(names) < 2 || names[len(names)-2] != "agent_end" || names[len(names)-1] != "agent_settled" {
+		t.Errorf("last events = %q, want agent_end then agent_settled", names[max(0, len(names)-2):])
 	}
 	if !containsSeq(names, "message_start", "message_end", "turn_end", "agent_end") {
 		t.Errorf("failure tail missing from %v", names)

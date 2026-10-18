@@ -32,13 +32,15 @@
 // assistant-event half of that projection is ai.MarshalEvent, frozen in P0;
 // this file adds the outer {type, usage, assistantMessageEvent} envelope.
 //
-// # Why this lives beside the old writer
+// # Why this is the only writer
 //
-// ndjson.go speaks the Claude Code SDK dialect (stream_event / tool_use /
-// result) for the deprecated engine path, which still runs until P7. The two
-// protocols are not variants of each other — different discriminants,
-// different message model — so they are two writers in one package rather
-// than one writer with a mode flag that could silently mix shapes.
+// ndjson.go used to speak the Claude Code SDK dialect (stream_event /
+// tool_use / result) for the deprecated engine path; both were deleted in P7.
+// It was kept beside this one during the migration rather than merged into a
+// writer with a mode flag, because the two protocols are not variants of each
+// other — different discriminants, different message model — and a mode flag
+// could silently mix shapes. With the old engine gone, only the pi dialect
+// remains.
 //
 // # Layering
 //
@@ -125,6 +127,12 @@ func (w *PiJSONWriter) writeEventLocked(ev agent.AgentEvent) error {
 		return w.write(map[string]any{
 			"type":     "agent_end",
 			"messages": e.Messages,
+		})
+
+	case agent.EvAgentSettled:
+		return w.write(map[string]any{
+			"type":    "agent_settled",
+			"aborted": e.Aborted,
 		})
 
 	case agent.EvTurnStart:

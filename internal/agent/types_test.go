@@ -17,17 +17,17 @@ import (
 	"ultrac/internal/ai"
 )
 
-// TestAgentEventNames pins the 10 agent events in pi's union order.
+// TestAgentEventNames pins the 11 agent events in pi's union order.
 //
 // pi: packages/agent/src/types.ts:516-539.
 func TestAgentEventNames(t *testing.T) {
 	events := []AgentEvent{
-		EvAgentStart{}, EvAgentEnd{}, EvTurnStart{}, EvTurnEnd{},
+		EvAgentStart{}, EvAgentEnd{}, EvAgentSettled{}, EvTurnStart{}, EvTurnEnd{},
 		EvMessageStart{}, EvMessageUpdate{}, EvMessageEnd{},
 		EvToolExecutionStart{}, EvToolExecutionUpdate{}, EvToolExecutionEnd{},
 	}
 	want := []string{
-		"agent_start", "agent_end",
+		"agent_start", "agent_end", "agent_settled",
 		"turn_start", "turn_end",
 		"message_start", "message_update", "message_end",
 		"tool_execution_start", "tool_execution_update", "tool_execution_end",

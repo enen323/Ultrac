@@ -746,6 +746,7 @@ func (a *Agent) handleRunFailure(ctx context.Context, runErr error) {
 	_ = a.processEvents(ctx, EvMessageEnd{Message: failure})
 	_ = a.processEvents(ctx, EvTurnEnd{Message: failure, ToolResults: nil})
 	_ = a.processEvents(ctx, EvAgentEnd{Messages: []ai.Message{failure}})
+	_ = a.processEvents(ctx, EvAgentSettled{Aborted: stop == ai.StopAborted})
 }
 
 // processEvents reduces internal state for one loop event, then awaits the

@@ -5,11 +5,10 @@
 // # The two vocabularies in this package
 //
 // This file adds pi's format alongside the Claude Code shaped Entry/Store API
-// in entry.go and store.go. Both are live during the migration: the old
-// engine (internal/engine, cmd/ultrac/agent.go) still writes the old shape to
-// ~/.ultrac/projects, and the TS implementation reads it. The old API is
-// deprecated and dies at P7; the new API is what internal/agent's callers and
-// the P5/P6 CLI will use.
+// in entry.go and store.go. The old API is deprecated: its last writer (the
+// pre-port engine) was deleted in P7, so it now only reads legacy transcripts
+// under ~/.ultrac/projects. The new API is what internal/agent's callers and
+// the CLI use.
 //
 // # What "aligned with pi" means concretely
 //

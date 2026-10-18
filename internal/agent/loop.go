@@ -221,7 +221,7 @@ func runLoop(
 				if err := emit(EvTurnEnd{Message: message, ToolResults: nil}); err != nil {
 					return newMessages, err
 				}
-				if err := emit(EvAgentEnd{Messages: newMessages}); err != nil {
+				if err := emitRunEnd(emit, newMessages, message.StopReason == ai.StopAborted); err != nil {
 					return newMessages, err
 				}
 				return newMessages, nil
@@ -270,7 +270,7 @@ func runLoop(
 			}
 
 			if decision == TurnEnd {
-				if err := emit(EvAgentEnd{Messages: newMessages}); err != nil {
+				if err := emitRunEnd(emit, newMessages, false); err != nil {
 					return newMessages, err
 				}
 				return newMessages, nil
@@ -303,10 +303,21 @@ func runLoop(
 		break
 	}
 
-	if err := emit(EvAgentEnd{Messages: newMessages}); err != nil {
+	if err := emitRunEnd(emit, newMessages, false); err != nil {
 		return newMessages, err
 	}
 	return newMessages, nil
+}
+
+// emitRunEnd closes a run: agent_end followed by agent_settled. pi emits the
+// pair from _emitAgentSettled (agent-session.ts:1077-1085) once the run's
+// deferred cleanup clears — settled follows end unconditionally, carrying
+// whether the run ended by abort rather than naturally.
+func emitRunEnd(emit EventSink, newMessages []AgentMessage, aborted bool) error {
+	if err := emit(EvAgentEnd{Messages: newMessages}); err != nil {
+		return err
+	}
+	return emit(EvAgentSettled{Aborted: aborted})
 }
 
 // streamAssistantResponse streams one assistant response from the LLM. This is

@@ -12,8 +12,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"ultrac/internal/agent"
 )
 
 // haveShell reports whether a shell is available; the bash tests skip
@@ -377,5 +380,51 @@ func TestPowerShellWindowsOnly(t *testing.T) {
 	}
 	if runErr == nil || !strings.Contains(runErr.Error(), "only available on Windows") {
 		t.Errorf("err = %v", runErr)
+	}
+}
+
+func TestBashPartialUpdates(t *testing.T) {
+	if !haveShell(t) {
+		return
+	}
+	dir := t.TempDir()
+	tool := bashTool(dir)
+	prepared, err := tool.Prepare(map[string]any{"command": "echo one; sleep 0.6; echo two"})
+	if err != nil {
+		t.Fatalf("Prepare failed: %v", err)
+	}
+	var mu sync.Mutex
+	var updates []string
+	_, err = tool.Run(context.Background(), "call-1", prepared, func(r agent.Result) {
+		mu.Lock()
+		updates = append(updates, resultText(r))
+		mu.Unlock()
+	})
+	if err != nil {
+		t.Fatalf("Run threw: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	// pi emits an empty partial on start (bash.ts:318-320), throttled
+	// snapshots while the command runs, and the authoritative tail last.
+	if len(updates) < 3 {
+		t.Fatalf("got %d updates (%q), want at least the empty start, one snapshot and the final tail", len(updates), updates)
+	}
+	if updates[0] != "" {
+		t.Errorf("first update = %q, want empty (pi's initial partial)", updates[0])
+	}
+	if !strings.Contains(updates[len(updates)-1], "two") {
+		t.Errorf("last update = %q, want the final output containing \"two\"", updates[len(updates)-1])
+	}
+	// A snapshot before the end must have seen only the first echo: the
+	// 0.6s gap guarantees at least one 100ms tick with just "one".
+	sawIntermediate := false
+	for _, u := range updates[1 : len(updates)-1] {
+		if strings.Contains(u, "one") && !strings.Contains(u, "two") {
+			sawIntermediate = true
+		}
+	}
+	if !sawIntermediate {
+		t.Errorf("no intermediate snapshot with only \"one\": %q", updates)
 	}
 }

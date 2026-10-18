@@ -382,6 +382,13 @@ type EvAgentEnd struct {
 	Messages []AgentMessage
 }
 
+// EvAgentSettled marks the run fully settled — emitted after agent_end, once
+// deferred cleanup has cleared (pi: agent-session.ts:203, _emitAgentSettled).
+// Aborted reports whether the run ended by abort rather than naturally.
+type EvAgentSettled struct {
+	Aborted bool
+}
+
 // EvTurnStart opens a turn: one assistant response plus its tool calls and
 // results. pi: types.ts:521.
 type EvTurnStart struct{}
@@ -437,6 +444,7 @@ type EvToolExecutionEnd struct {
 
 func (EvAgentStart) agentEventName() string          { return "agent_start" }
 func (EvAgentEnd) agentEventName() string            { return "agent_end" }
+func (EvAgentSettled) agentEventName() string        { return "agent_settled" }
 func (EvTurnStart) agentEventName() string           { return "turn_start" }
 func (EvTurnEnd) agentEventName() string             { return "turn_end" }
 func (EvMessageStart) agentEventName() string        { return "message_start" }

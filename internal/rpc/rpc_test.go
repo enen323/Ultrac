@@ -676,8 +676,8 @@ func TestPromptStartsRunResponseBeforeEvents(t *testing.T) {
 	if len(types) == 0 || types[0] != "agent_start" {
 		t.Fatalf("event types = %v, want agent_start first", types)
 	}
-	if types[len(types)-1] != "agent_end" {
-		t.Errorf("event types = %v, want agent_end last", types)
+	if len(types) < 2 || types[len(types)-2] != "agent_end" || types[len(types)-1] != "agent_settled" {
+		t.Errorf("event types = %v, want agent_end then agent_settled last", types)
 	}
 
 	// The run actually happened: the transcript carries the user message

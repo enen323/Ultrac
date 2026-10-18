@@ -23,10 +23,10 @@ package tool
 //
 // # Contract deviations from the TypeScript, all deliberate
 //
-//   - No live output streaming (pi emits throttled snapshots through
-//     onUpdate). The temp-file design has no concurrent reader, so partial
-//     results would require a polling goroutine; the loop already renders
-//     tool_execution_start, and the final result carries everything.
+//   - Live output streaming matches pi's (throttled snapshots through
+//     onUpdate, dirty-gated, 100ms apart — bash.ts:283-320). The temp-file
+//     design needed a polling goroutine to do it; P7's E4 double-run
+//     against the real pi caught the missing partials.
 //   - No PI_* session environment variables (pi exposes session metadata
 //     through its ExtensionContext; the harness port has no session
 //     context in Execute — that wiring belongs to P4/P5).
@@ -45,6 +45,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"ultrac/internal/agent"
@@ -118,6 +119,10 @@ const structuredOutputMaxBytes = 1024 * 1024
 // so the truncation always has whole lines to work with.
 const tailMargin = 256 * 1024
 
+// bashUpdateInterval is pi's BASH_UPDATE_THROTTLE_MS (renderers/bash.ts:19):
+// the minimum spacing between partial-result updates while a command runs.
+const bashUpdateInterval = 100 * time.Millisecond
+
 var bashToolConfig = shellToolConfig{
 	name:          "bash",
 	label:         "bash",
@@ -152,8 +157,8 @@ func newShellTool(cwd string, cfg shellToolConfig, resolveShell func() (string, 
 		},
 		Label:        cfg.label,
 		OutputSchema: json.RawMessage(bashOutputSchema),
-		Execute: func(ctx context.Context, _ string, in BashInput, _ func(agent.Result)) (agent.Result, error) {
-			return runShellCommand(ctx, cwd, cfg, resolveShell, in)
+		Execute: func(ctx context.Context, _ string, in BashInput, onUpdate func(agent.Result)) (agent.Result, error) {
+			return runShellCommand(ctx, cwd, cfg, resolveShell, in, onUpdate)
 		},
 	}
 }
@@ -253,6 +258,7 @@ func runShellCommand(
 	cfg shellToolConfig,
 	resolveShell func() (string, []string, error),
 	in BashInput,
+	onUpdate func(agent.Result),
 ) (agent.Result, error) {
 	command := in.Command
 	if strings.TrimSpace(command) == "" {
@@ -336,6 +342,55 @@ func runShellCommand(
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
+	// Partial updates: pi's bash streams a snapshot of the accumulated
+	// output while the command runs, but only when new output has arrived
+	// since the last update (the updateDirty gate in bash.ts:283-296), at
+	// most every 100ms (BASH_UPDATE_THROTTLE_MS), starting with an empty
+	// one on start (bash.ts:318-320). The final snapshot after the wait is
+	// dirty-gated too (finishOutput → emitOutputUpdate).
+	//
+	// The ticker goroutine is the only emitter during the wait below — the
+	// loop goroutine is blocked in the select — so sequential and parallel
+	// paths are both race-free.
+	var partialDone chan struct{}
+	var partialEmit func()
+	if onUpdate != nil {
+		onUpdate(agent.Result{Content: []ai.ContentBlock{}})
+		partialDone = make(chan struct{})
+
+		var partialMu sync.Mutex
+		partialSize := int64(0) // the file starts empty; the empty start update is already out
+		emitIfGrown := func() {
+			fi, err := os.Stat(outPath)
+			if err != nil {
+				return
+			}
+			partialMu.Lock()
+			grown := fi.Size() != partialSize
+			partialSize = fi.Size()
+			partialMu.Unlock()
+			if !grown {
+				return
+			}
+			tail, tr, _, _, _ := readOutputTail(outPath, defaultMaxLines, defaultMaxBytes)
+			onUpdate(bashPartialResult(tail, tr, outPath))
+		}
+		partialEmit = emitIfGrown
+
+		go func() {
+			ticker := time.NewTicker(bashUpdateInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-partialDone:
+					return
+				case <-ticker.C:
+					emitIfGrown()
+				}
+			}
+		}()
+	}
+
 	var (
 		waitErr   error
 		timedOut  bool
@@ -366,10 +421,18 @@ func runShellCommand(
 	// its own descriptor, so nothing else needs this one.
 	outFile.Close()
 
+	// The ticker is done; the final snapshot below is the last update.
+	if partialDone != nil {
+		close(partialDone)
+	}
+
 	// Read the captured output before deciding what to report. On the
 	// error paths the partial output still belongs in the message — a
 	// timed-out build log is exactly what the model needs to see.
 	tail, tr, totalLines, _, lastLineBytes := readOutputTail(outPath, defaultMaxLines, defaultMaxBytes)
+	if partialEmit != nil {
+		partialEmit()
+	}
 
 	render := func(emptyText string) string {
 		text := tail
@@ -445,6 +508,18 @@ func runShellCommand(
 	}
 	res.StructuredContent = bashStructuredContent(full, fullTruncated, outPath, exitCode, wallSeconds, tr.Truncated)
 	return res, nil
+}
+
+// bashPartialResult builds one tool_execution_update payload for a running
+// command: the accumulated output so far as text, plus the truncation details
+// when the output is already over the limit (pi: bash.ts:287-296 — the
+// snapshot's content and its truncation/fullOutputPath details).
+func bashPartialResult(tail string, tr TruncationResult, outPath string) agent.Result {
+	res := textResult(tail)
+	if tr.Truncated {
+		res.Details = BashDetails{Truncation: &tr, FullOutputPath: outPath}
+	}
+	return res
 }
 
 // bashStructuredContent builds the programmatic payload
