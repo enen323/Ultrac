@@ -5,9 +5,11 @@ package main
 //
 // # The shape
 //
-// One invocation: resolve settings → resolve the model → open (or continue) a
-// session → build the tools and the sectioned system prompt → run the agent →
+// One invocation: assemble the harness (settings → session → model → tools
+// → prompt sections, assemble.go) → build the agent → run the prompt →
 // print the answer (text mode) or the event stream (json mode) → exit.
+// The RPC mode (rpc.go) assembles through the same chain and diverges only
+// after it.
 //
 // # Two deliberate differences from the old T1 path
 //
@@ -42,17 +44,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"time"
 
 	"ultrac/internal/agent"
 	"ultrac/internal/ai"
-	"ultrac/internal/config"
-	"ultrac/internal/logging"
-	"ultrac/internal/prompt"
-	"ultrac/internal/session"
-	"ultrac/internal/tool"
 	"ultrac/internal/transport"
-	"ultrac/internal/version"
 )
 
 // printSession is one print-mode run. It exists as a struct rather than a
@@ -77,122 +72,62 @@ func runPrint(f *agentFlags, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "ultrac: %v\n", err)
 		return 1
 	}
-	if f.CWD != "" {
-		// --cwd is not decoration: it picks the directory the tools resolve
-		// paths against, the session the transcript belongs to, and the
-		// project settings layer that is read.
-		abs, aerr := filepath.Abs(f.CWD)
-		if aerr != nil {
-			fmt.Fprintf(stderr, "ultrac: --cwd: %v\n", aerr)
-			return 2
-		}
-		info, serr := os.Stat(abs)
-		if serr != nil || !info.IsDir() {
-			fmt.Fprintf(stderr, "ultrac: --cwd %s is not a directory\n", f.CWD)
-			return 2
-		}
-		cwd = abs
+	cwd, code := resolveCWD(f, cwd, stderr)
+	if code != 0 {
+		return code
 	}
 	return (&printSession{flags: f, stdout: stdout, stderr: stderr, cwd: cwd}).run()
+}
+
+// resolveCWD applies --cwd to the process working directory. It is shared
+// by the print and RPC modes because both resolve paths, sessions and the
+// project settings layer against the same directory.
+//
+// --cwd is not decoration: it picks the directory the tools resolve paths
+// against, the session the transcript belongs to, and the project settings
+// layer that is read. A bad value is exit code 2 (a bad invocation), the
+// same class as an unknown flag.
+func resolveCWD(f *agentFlags, cwd string, stderr io.Writer) (string, int) {
+	if f.CWD == "" {
+		return cwd, 0
+	}
+	abs, err := filepath.Abs(f.CWD)
+	if err != nil {
+		fmt.Fprintf(stderr, "ultrac: --cwd: %v\n", err)
+		return "", 2
+	}
+	info, serr := os.Stat(abs)
+	if serr != nil || !info.IsDir() {
+		fmt.Fprintf(stderr, "ultrac: --cwd %s is not a directory\n", f.CWD)
+		return "", 2
+	}
+	return abs, 0
 }
 
 func (ps *printSession) run() int {
 	f := ps.flags
 
-	if f.Debug {
-		logging.SetDefault(logging.New(logging.Options{
-			Level:   logging.LevelDebug,
-			Version: version.Get().Version,
-		}))
+	// -- 1-4. The shared assembly ------------------------------------------
+	//
+	// Settings, session, model, credential and tools — the same chain the
+	// RPC mode assembles through (assemble.go). A non-zero code means the
+	// reason is already on stderr.
+	h, code := buildHarness(f, ps.cwd, ps.stderr, ps.streamFn)
+	if code != 0 {
+		return code
+	}
+	mgr := h.mgr
+	if !f.Continue {
+		// A resumed session already carries the model and thinking level
+		// in its file; a fresh one needs them before the first message.
+		h.recordSessionMeta(mgr)
 	}
 
 	ctx, stopWatch, firedSignal := printSignalContext()
 	defer stopWatch()
 
-	// -- 1. Settings ------------------------------------------------------
-	//
-	// Layers are read but never applied to the process environment (see the
-	// file comment). A load error is a warning, not a failure: a broken
-	// project settings file must not take down a run that the user settings
-	// alone can serve.
-	r := config.NewFileResolver()
-	layers, loadErr := r.Layers(ctx, ps.cwd)
-	if loadErr != nil {
-		fmt.Fprintf(ps.stderr, "warning: %v\n", loadErr)
-	}
-	effective := config.EffectiveEnv(layers)
-
-	// -- 2. Session ---------------------------------------------------------
-	//
-	// Opened before the model is resolved because a resumed session can
-	// supply the model when neither the flag nor the settings name one.
-	mgr, seed, err := ps.openSession()
-	if err != nil {
-		fmt.Fprintf(ps.stderr, "ultrac: %v\n", err)
-		return 1
-	}
-
-	// -- 3. Model and credential ------------------------------------------
-	flagModel := f.Model
-	if flagModel == "" && effective[config.EnvModel] == "" && seed.Model != nil {
-		// Resume fallback: the session's last recorded model, expressed in
-		// the flag's provider/id syntax so resolveModel treats it exactly
-		// like a user-typed value.
-		flagModel = seed.Model.Provider + "/" + seed.Model.ModelID
-	}
-	model, err := resolveModel(flagModel, f.API, effective)
-	if err != nil {
-		fmt.Fprintf(ps.stderr, "ultrac: %v\n", err)
-		return 2
-	}
-	ps.recordSessionMeta(mgr, model)
-	apiKey := apiKeyFor(effective)
-	if apiKey == "" {
-		fmt.Fprintln(ps.stderr, "ultrac: no credential is configured.")
-		fmt.Fprintln(ps.stderr, "        Put ANTHROPIC_AUTH_TOKEN (or ANTHROPIC_API_KEY) in the \"env\" block of")
-		fmt.Fprintf(ps.stderr, "        %s.\n", filepath.Join(config.ConfigHome(), "settings.json"))
-		fmt.Fprintln(ps.stderr, "        Run `ultrac config` to see what the layers currently resolve to.")
-		return 1
-	}
-
-	// -- 4. Tools and the sectioned prompt ----------------------------------
-	tools := tool.All(ps.cwd)
-	toolNames := make([]string, len(tools))
-	for i, t := range tools {
-		toolNames[i] = t.Name()
-	}
-	_, sections, err := prompt.BuildSystemPromptState(prompt.Options{
-		CWD:           ps.cwd,
-		SelectedTools: toolNames,
-		ContextFiles:  prompt.LoadContextFiles(ps.cwd),
-	})
-	if err != nil {
-		fmt.Fprintf(ps.stderr, "ultrac: system prompt: %v\n", err)
-		return 1
-	}
-
-	// The prompt diff: replay the transcript's current sections against the
-	// freshly built ones and carry the delta as a system patch message
-	// (pi: agent-session.ts:1742-1754, _preparePromptAndToolLoadout).
-	initial := &agent.AgentInitialState{
-		// Empty on purpose — the prompt lives in the sections patch, not in
-		// a plain leading message (pi: sdk.ts:413).
-		SystemPrompt: "",
-		Model:        &model,
-		Tools:        tools,
-	}
-	if ps.flags.Continue {
-		initial.Messages = seed.Messages
-	}
-	patch := prompt.DiffSystemPromptSections(currentSections(initial.Messages), sections)
-
 	// -- 5. Agent -------------------------------------------------------------
-	a := agent.NewAgent(agent.AgentOptions{
-		InitialState: initial,
-		GetAPIKey:    func(string) string { return apiKey },
-		SessionID:    mgr.SessionID(),
-		StreamFn:     ps.streamFn,
-	})
+	a := h.newAgent(mgr, f.Continue)
 
 	// -- 6. Output surfaces ----------------------------------------------------
 	jsonMode := f.Mode == "json"
@@ -201,8 +136,8 @@ func (ps *printSession) run() int {
 		writer = transport.NewPiJSONWriter(ps.stdout)
 		// The header opens the stream, before any event (pi:
 		// print-mode.ts:122-127).
-		h := mgr.Header()
-		if err := writer.WriteHeader(&h); err != nil {
+		hdr := mgr.Header()
+		if err := writer.WriteHeader(&hdr); err != nil {
 			fmt.Fprintf(ps.stderr, "ultrac: %v\n", err)
 			return 1
 		}
@@ -232,9 +167,18 @@ func (ps *printSession) run() int {
 	defer unsubscribe()
 
 	// -- 7. Run -----------------------------------------------------------------
-	prompts := []ai.Message{userMessage(f.prompt())}
-	if patch != nil {
-		prompts = append([]ai.Message{systemPatchMessage(patch)}, prompts...)
+	//
+	// The prompt is assembled per run: the sections patch diffed against
+	// the transcript's current sections, then the user message (pi:
+	// agent-session.ts:1742-1754).
+	in, err := h.buildPrompt(a, f.prompt(), nil)
+	if err != nil {
+		fmt.Fprintf(ps.stderr, "ultrac: %v\n", err)
+		return 1
+	}
+	prompts := []ai.Message{in.User}
+	if in.Patch != nil {
+		prompts = append([]ai.Message{*in.Patch}, prompts...)
 	}
 	// Prompt blocks until the run settles (runWithLifecycle calls the loop
 	// synchronously); run-level failures arrive as events and
@@ -285,97 +229,4 @@ func (ps *printSession) run() int {
 		fmt.Fprintf(ps.stderr, "[debug] session: %s\n", mgr.SessionFile())
 	}
 	return exitCode
-}
-
-// openSession creates a session or resumes the most recent one for the cwd.
-// The seed context is empty for a new session.
-func (ps *printSession) openSession() (*session.SessionManager, session.SessionContext, error) {
-	if ps.flags.Continue {
-		mgr, err := session.ContinueRecentSession(ps.cwd)
-		if err != nil {
-			return nil, session.SessionContext{}, err
-		}
-		seed := mgr.BuildSessionContext()
-		// Restore missing metadata the way pi does on resume
-		// (sdk.ts:449-452): an older file without a thinking entry gets one
-		// so a later resume still finds the level.
-		if seed.ThinkingLevel == "" && !hasThinkingEntry(mgr) {
-			_, _ = mgr.AppendThinkingLevelChange(string(agent.ThinkOff))
-		}
-		return mgr, seed, nil
-	}
-	return session.CreateSession(ps.cwd), session.SessionContext{}, nil
-}
-
-// recordSessionMeta writes the model and thinking level a new session needs
-// so a resume restores them (pi: sdk.ts:453-458). A resumed session already
-// carries them, so nothing is written.
-//
-// The entries land before any message thanks to the lazy flush: nothing is
-// written to disk until the first user or assistant message, at which point
-// the header and every entry so far go out in one create-write.
-func (ps *printSession) recordSessionMeta(mgr *session.SessionManager, model ai.Model) {
-	if ps.flags.Continue {
-		return
-	}
-	if _, err := mgr.AppendModelChange(string(model.Provider), model.ID); err != nil && ps.flags.Debug {
-		fmt.Fprintf(ps.stderr, "[debug] session append: %v\n", err)
-	}
-	if _, err := mgr.AppendThinkingLevelChange(string(agent.ThinkOff)); err != nil && ps.flags.Debug {
-		fmt.Fprintf(ps.stderr, "[debug] session append: %v\n", err)
-	}
-}
-
-// persistable reports whether a role is written to the session file. The set
-// is pi's (agent-session.ts:1158-1163): system, user, assistant, toolResult.
-func persistable(role ai.Role) bool {
-	switch role {
-	case ai.RoleSystem, ai.RoleUser, ai.RoleAssistant, ai.RoleToolResult:
-		return true
-	default:
-		return false
-	}
-}
-
-// currentSections returns the sections the transcript's system messages
-// currently declare, or nil when there is no system message yet.
-func currentSections(messages []ai.Message) map[string]*string {
-	for _, m := range messages {
-		if m.Role == ai.RoleSystem {
-			return m.Sections
-		}
-	}
-	return nil
-}
-
-// systemPatchMessage builds the diff message. The empty text block is not
-// decoration: pi writes content "" on the wire, and a system message whose
-// content key is absent (or null) breaks pi's contentText on read
-// (ai/src/utils/text.ts:5-12).
-func systemPatchMessage(sections map[string]*string) ai.Message {
-	return ai.Message{
-		Role:        ai.RoleSystem,
-		Content:     []ai.ContentBlock{ai.TextBlock("")},
-		Sections:    sections,
-		TimestampMS: time.Now().UnixMilli(),
-	}
-}
-
-// userMessage builds the prompt message with the timestamp pi records
-// (agent-session.ts:1912-1916).
-func userMessage(text string) ai.Message {
-	m := ai.NewTextMessage(ai.RoleUser, text)
-	m.TimestampMS = time.Now().UnixMilli()
-	return m
-}
-
-// hasThinkingEntry reports whether the session file already carries a
-// thinking_level_change entry.
-func hasThinkingEntry(mgr *session.SessionManager) bool {
-	for _, e := range mgr.Entries() {
-		if e.Type == session.TypeThinkingLevelChange {
-			return true
-		}
-	}
-	return false
 }
