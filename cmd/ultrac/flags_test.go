@@ -79,11 +79,18 @@ func TestParseFlagsUnknownFlagIsError(t *testing.T) {
 	}
 }
 
-func TestParseFlagsModeRejectsRPC(t *testing.T) {
-	// rpc is pi's third mode and arrives with P6; accepting it silently as
-	// text would make `--mode rpc` a lie.
-	if _, err := parseFlags([]string{"--mode", "rpc", "hi"}); err == nil {
-		t.Fatal("parseFlags(--mode rpc) succeeded, want an error")
+func TestParseFlagsModeAcceptsRPC(t *testing.T) {
+	// rpc landed with P6 (rpc.go); it is the headless JSONL protocol mode,
+	// and `--mode rpc` with no prompt is a complete invocation.
+	f, err := parseFlags([]string{"--mode", "rpc"})
+	if err != nil {
+		t.Fatalf("parseFlags(--mode rpc): %v", err)
+	}
+	if f.Mode != "rpc" {
+		t.Errorf("mode = %q, want rpc", f.Mode)
+	}
+	if f.prompt() != "" {
+		t.Errorf("prompt = %q, want empty (prompts come from the command stream)", f.prompt())
 	}
 }
 

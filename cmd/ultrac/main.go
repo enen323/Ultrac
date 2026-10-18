@@ -5,7 +5,7 @@
 //
 //	print   `ultrac -p "prompt"` / `ultrac "prompt"` — run and exit
 //	json    `ultrac --mode json "prompt"` — the event stream, one JSON per line
-//	rpc     `--mode rpc` — arrives with P6; rejected until then
+//	rpc     `ultrac --mode rpc` — the headless JSONL protocol on stdin/stdout (P6)
 //
 // The diagnostic commands (config / sessions / ask / doctor) predate this
 // phase and still inspect the T0 foundation — the old engine's provider
@@ -84,6 +84,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if f.Version {
 		fmt.Fprintln(stdout, version.String())
 		return 0
+	}
+	// RPC mode takes its prompts from the command stream, not argv: a bare
+	// `ultrac --mode rpc` is a complete invocation (pi's resolveAppMode
+	// treats the mode flag as the mode).
+	if f.Mode == "rpc" {
+		return runRPC(f, os.Stdin, stdout, stderr)
 	}
 	prompt := f.prompt()
 	if prompt == "" && !f.Continue {

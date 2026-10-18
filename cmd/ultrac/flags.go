@@ -46,10 +46,9 @@ type agentFlags struct {
 	promptParts []string
 }
 
-// modes is the closed set --mode accepts. "rpc" is pi's third value and
-// lands with P6; rejecting it here rather than silently running text mode is
-// what keeps the flag honest.
-var modes = []string{"text", "json"}
+// modes is the closed set --mode accepts. "rpc" is pi's third value: the
+// headless JSONL protocol on stdin/stdout (rpc.go, landed with P6).
+var modes = []string{"text", "json", "rpc"}
 
 // parseFlags parses argv.
 //
@@ -108,7 +107,7 @@ func parseFlags(args []string) (*agentFlags, error) {
 				return nil, err
 			}
 			if !contains(modes, v) {
-				return nil, fmt.Errorf("--mode must be one of %s; got %q (rpc arrives with the RPC mode)",
+				return nil, fmt.Errorf("--mode must be one of %s; got %q",
 					strings.Join(modes, ", "), v)
 			}
 			f.Mode = v
@@ -175,6 +174,7 @@ func usageText(w io.Writer, version, apis, tools string) {
 	fmt.Fprintf(w, "ultrac %s — Go engine (pi harness port)\n\n", version)
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  ultrac [flags] [prompt]       run the agent on a prompt and exit")
+	fmt.Fprintln(w, "  ultrac --mode rpc             serve the RPC protocol on stdin/stdout")
 	fmt.Fprintln(w, "  ultrac <command> [args]       run a diagnostic command")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
@@ -186,7 +186,7 @@ func usageText(w io.Writer, version, apis, tools string) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  -p, --print                  non-interactive: process the prompt and exit")
-	fmt.Fprintln(w, "      --mode MODE              output format: text (default) | json")
+	fmt.Fprintln(w, "      --mode MODE              output format: text (default) | json | rpc")
 	fmt.Fprintln(w, "      --model PROVIDER/ID      model selection (e.g. deepseek/deepseek-chat)")
 	fmt.Fprintln(w, "      --api DIALECT            override the provider dialect (anthropic-messages | openai-completions)")
 	fmt.Fprintln(w, "      --cwd DIR                run in another directory")
