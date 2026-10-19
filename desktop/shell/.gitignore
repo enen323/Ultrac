@@ -1,0 +1,2 @@
+# Electron and its toolchain arrive with P-S1 (plan §3); keep them out.
+node_modules/

@@ -1,0 +1,13 @@
+{
+  "name": "ultrac-shell",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Electron shell for Ultrac: spawns `ultrac --mode rpc` and speaks the C4 JSONL protocol (docs/desktop-shell-plan.md).",
+  "scripts": {
+    "test": "node --test test/*.test.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  }
+}
