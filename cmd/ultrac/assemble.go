@@ -184,7 +184,11 @@ func (h *harness) recordSessionMeta(mgr *session.SessionManager) {
 // sectioned prompt. mgr is the session the agent belongs to — after a
 // new_session swap it is no longer h.mgr, and the agent's SessionID must
 // name the session it actually writes to.
-func (h *harness) newAgent(mgr *session.SessionManager, resume bool) *agent.Agent {
+//
+// The seed is a parameter rather than h.seed so the caller names which
+// transcript is being replayed: the startup one for --continue, the
+// freshly loaded one for the RPC resume_session command (rpc.go).
+func (h *harness) newAgent(mgr *session.SessionManager, seed session.SessionContext, resume bool) *agent.Agent {
 	initial := &agent.AgentInitialState{
 		// Empty on purpose — the prompt lives in the sections patch, not in
 		// a plain leading message (pi: sdk.ts:413).
@@ -193,7 +197,22 @@ func (h *harness) newAgent(mgr *session.SessionManager, resume bool) *agent.Agen
 		Tools:        h.tools,
 	}
 	if resume {
-		initial.Messages = h.seed.Messages
+		initial.Messages = seed.Messages
+		// The transcript's thinking level rides along on resume: dropping
+		// back to off would silently change how the continued conversation
+		// reasons (pi restores it the same way on resume, sdk.ts:449-458).
+		// The clamp is the command path's own rule (set_thinking_level
+		// applies ai.ClampThinkingLevel the same way): a file whose
+		// (model, level) pair is impossible — hand-edited, or written by a
+		// build without the clamp — must not put a level the restored
+		// model cannot honour onto the wire.
+		if seed.ThinkingLevel != "" {
+			level := agent.ThinkingLevel(ai.ClampThinkingLevel(
+				ai.SupportedThinkingLevels(h.model),
+				ai.ModelThinkingLevel(seed.ThinkingLevel),
+			))
+			initial.ThinkingLevel = &level
+		}
 	}
 	return agent.NewAgent(agent.AgentOptions{
 		InitialState: initial,

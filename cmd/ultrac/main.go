@@ -270,29 +270,11 @@ func runSessions(args []string, stdout, stderr io.Writer) int {
 }
 
 // sessionTitle is the first user message's leading text, truncated — the
-// same "what was this session about" line the T0 store's Title() gave,
-// read out of the pi-shaped entries.
+// same "what was this session about" line the T0 store's Title() gave.
+// The rule itself lives in the session package (list.go) so the CLI and
+// the RPC list_sessions command cannot drift apart.
 func sessionTitle(entries []*session.SessionEntry) string {
-	for _, e := range entries {
-		if e == nil || e.Type != session.TypeMessage {
-			continue
-		}
-		msg, ok := session.EntryMessage(e)
-		if !ok || msg.Role != ai.RoleUser {
-			continue
-		}
-		for _, b := range msg.Content {
-			if b.Text == "" {
-				continue
-			}
-			title := strings.Join(strings.Fields(b.Text), " ")
-			if len(title) > 48 {
-				title = title[:48] + "..."
-			}
-			return title
-		}
-	}
-	return "(no user message)"
+	return session.SessionTitle(entries)
 }
 
 func listOrNone(items []string) string {

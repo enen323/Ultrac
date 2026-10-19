@@ -17,9 +17,11 @@ package rpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -29,6 +31,7 @@ import (
 
 	"ultrac/internal/agent"
 	"ultrac/internal/ai"
+	"ultrac/internal/config"
 	"ultrac/internal/session"
 	"ultrac/internal/transport"
 )
@@ -49,6 +52,12 @@ type testHost struct {
 	agentEnds   int32 // atomic: completed runs, counted by a host subscription
 	transcripts []ai.TranscriptContext
 	runCtx      context.Context
+
+	// listSessions / listErr back the ListSessions method: canned data for
+	// the protocol-shape tests, an error for the failure path. The real
+	// listing lives in the session package and is tested there.
+	listSessions []session.SessionSummary
+	listErr      error
 }
 
 func newTestHost(t *testing.T, scripts ...[]ai.AssistantEvent) *testHost {
@@ -236,6 +245,52 @@ func (h *testHost) BuildPrompt(text string, images []ImageContent) (PromptInput,
 	}}, nil
 }
 
+// ListSessions serves the canned summaries, mirroring what the real host
+// (cmd/ultrac's rpcHost) delegates to the session package.
+func (h *testHost) ListSessions() ([]session.SessionSummary, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.listSessions, h.listErr
+}
+
+// ResumeSession loads a real transcript file and swaps the agent over to
+// it — the protocol half of what the real host does, minus the model and
+// thinking-level restoration (tested in cmd/ultrac against the harness).
+func (h *testHost) ResumeSession(path string) error {
+	old := h.Agent()
+	old.Abort()
+	waitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = old.WaitForIdle(waitCtx)
+
+	mgr, err := session.OpenSession(path)
+	if err != nil {
+		return err
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.session = mgr
+	m := h.agent.State().Model
+	h.agent = agent.NewAgent(agent.AgentOptions{
+		InitialState: &agent.AgentInitialState{
+			Model:    &m,
+			Messages: mgr.BuildSessionContext().Messages,
+		},
+		StreamFn:  h.streamFn,
+		SessionID: mgr.SessionID(),
+	})
+	// The settled-run counter rides along with every agent this host
+	// builds (reset does the same), so settle() keeps working after a swap.
+	h.agent.Subscribe(func(_ context.Context, ev agent.AgentEvent) error {
+		if _, ok := ev.(agent.EvAgentEnd); ok {
+			atomic.AddInt32(&h.agentEnds, 1)
+		}
+		return nil
+	})
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Scripts
 // ---------------------------------------------------------------------------
@@ -399,6 +454,26 @@ func commandsIncludePrompt(commands []string) bool {
 		}
 	}
 	return false
+}
+
+// writeSessionFile writes a real transcript with one exchange and returns
+// its path — the file ResumeSession opens, so the swap under test loads a
+// genuine session rather than a struct. The config home is redirected so
+// no test touches ~/.ultrac.
+func writeSessionFile(t *testing.T, cwd, prompt, answer string) string {
+	t.Helper()
+	home := filepath.Join(t.TempDir(), ".ultrac")
+	t.Setenv(config.EnvConfigDir, home)
+	m := session.CreateSession(cwd)
+	for _, msg := range []ai.Message{
+		{Role: ai.RoleUser, Content: []ai.ContentBlock{ai.TextBlock(prompt)}, TimestampMS: time.Now().UnixMilli()},
+		{Role: ai.RoleAssistant, Content: []ai.ContentBlock{ai.TextBlock(answer)}, TimestampMS: time.Now().UnixMilli()},
+	} {
+		if _, err := m.AppendMessage(msg); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+	return m.SessionFile()
 }
 
 func parseLines(t *testing.T, raw string) []map[string]any {
@@ -901,6 +976,174 @@ func TestNewSessionSwapsAgentAndSession(t *testing.T) {
 	}
 	if !strings.Contains(ai.MessageText(mustMessage(t, list[1])), "second") {
 		t.Errorf("assistant message = %q, want the second script's answer", ai.MessageText(mustMessage(t, list[1])))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Session listing and resume (P-D0: the desktop shell's sidebar)
+// ---------------------------------------------------------------------------
+
+func TestListSessionsShape(t *testing.T) {
+	h := newTestHost(t)
+	h.listSessions = []session.SessionSummary{
+		{
+			SessionID: "019aaa", Path: `C:\sessions\a.jsonl`, Title: "fix the login bug",
+			Timestamp: "2026-10-19T08:00:00.000Z", MessageCount: 4, Name: "auth work", CWD: `D:\repo`,
+		},
+		{
+			SessionID: "019bbb", Path: `C:\sessions\b.jsonl`, Title: "(no user message)",
+			Timestamp: "2026-10-18T08:00:00.000Z",
+		},
+	}
+	lines := h.serve(t, cmd("list_sessions", map[string]any{"id": "ls"}))
+	r := response(t, lines, "list_sessions")
+	if r["success"] != true {
+		t.Fatalf("list_sessions = %v", r)
+	}
+	list, ok := dataMap(t, r)["sessions"].([]any)
+	if !ok {
+		t.Fatalf("sessions = %v, want a list", dataMap(t, r)["sessions"])
+	}
+	if len(list) != 2 {
+		t.Fatalf("listed %d sessions, want 2 (host order preserved)", len(list))
+	}
+	first, _ := list[0].(map[string]any)
+	for k, want := range map[string]any{
+		"sessionId":    "019aaa",
+		"path":         `C:\sessions\a.jsonl`,
+		"title":        "fix the login bug",
+		"timestamp":    "2026-10-19T08:00:00.000Z",
+		"messageCount": float64(4),
+		"name":         "auth work",
+		"cwd":          `D:\repo`,
+	} {
+		if first[k] != want {
+			t.Errorf("session[%q] = %v, want %v", k, first[k], want)
+		}
+	}
+	// A session with no display name omits the field rather than sending "".
+	second, _ := list[1].(map[string]any)
+	if _, has := second["name"]; has {
+		t.Errorf("name = %v, want absent (omitempty) when unset", second["name"])
+	}
+}
+
+func TestListSessionsEmptyIsSuccess(t *testing.T) {
+	h := newTestHost(t) // no canned sessions: the nil list
+	lines := h.serve(t, cmd("list_sessions", nil))
+	d := dataMap(t, response(t, lines, "list_sessions"))
+	list, ok := d["sessions"].([]any)
+	if !ok {
+		t.Fatalf("sessions = %v, want a list — null would force the client to special-case it", d["sessions"])
+	}
+	if len(list) != 0 {
+		t.Errorf("listed %d sessions, want 0", len(list))
+	}
+}
+
+func TestListSessionsErrorResponse(t *testing.T) {
+	h := newTestHost(t)
+	h.listErr = errors.New("sessions directory unreadable")
+	lines := h.serve(t, cmd("list_sessions", map[string]any{"id": "ls"}))
+	r := response(t, lines, "list_sessions")
+	if r["success"] != false {
+		t.Errorf("success = %v, want false", r["success"])
+	}
+	if msg, _ := r["error"].(string); msg != "sessions directory unreadable" {
+		t.Errorf("error = %q, want the host's message verbatim", msg)
+	}
+}
+
+func TestResumeSessionSwapsToLoadedTranscript(t *testing.T) {
+	path := writeSessionFile(t, `D:\repo`, "earlier question", "earlier answer")
+	h := newTestHost(t, textScript("after resume"))
+
+	lines := h.serve(t,
+		cmd("get_state", map[string]any{"id": "before"}),
+		cmd("resume_session", map[string]any{"id": "rs", "sessionPath": path}),
+		cmd("get_state", map[string]any{"id": "after"}),
+	)
+	r := response(t, lines, "resume_session")
+	if r["success"] != true {
+		t.Fatalf("resume_session = %v", r)
+	}
+	if dataMap(t, r)["cancelled"] != false {
+		t.Error("cancelled must be false in a headless session")
+	}
+
+	var before, after map[string]any
+	for _, l := range responses(lines) {
+		if l["command"] == "get_state" {
+			switch l["id"] {
+			case "before":
+				before = dataMap(t, l)
+			case "after":
+				after = dataMap(t, l)
+			}
+		}
+	}
+	if before["sessionId"] == after["sessionId"] {
+		t.Error("resume_session must load another session identity")
+	}
+	if after["sessionFile"] != path {
+		t.Errorf("sessionFile = %v, want the resumed path", after["sessionFile"])
+	}
+	if after["messageCount"].(float64) != 2 {
+		t.Errorf("messageCount = %v, want 2 (the replayed exchange)", after["messageCount"])
+	}
+
+	// The replay is real: the next run's transcript starts from the loaded
+	// conversation, and its events reach the client through the rebound
+	// pump (the pump that stayed bound to the abandoned agent would show
+	// nothing).
+	h.serve(t, cmd("prompt", map[string]any{"message": "next"}))
+	lines = h.serve(t, cmd("get_messages", nil))
+	list, _ := dataMap(t, response(t, lines, "get_messages"))["messages"].([]any)
+	if len(list) != 4 {
+		t.Fatalf("messages = %d, want 4 (the replayed exchange + the new run)", len(list))
+	}
+	if ai.MessageText(mustMessage(t, list[0])) != "earlier question" {
+		t.Errorf("first message = %q, want the replayed user message", ai.MessageText(mustMessage(t, list[0])))
+	}
+	if ai.MessageText(mustMessage(t, list[3])) != "after resume" {
+		t.Errorf("last message = %q, want the new answer", ai.MessageText(mustMessage(t, list[3])))
+	}
+}
+
+func TestResumeSessionErrors(t *testing.T) {
+	h := newTestHost(t)
+	// Entries without a header: the shape OpenSession refuses — what a
+	// truncated or foreign transcript looks like.
+	headerless := filepath.Join(t.TempDir(), "headerless.jsonl")
+	if err := os.WriteFile(headerless,
+		[]byte(`{"type":"message","id":"x1","parentId":null,"timestamp":"2026-10-19T08:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"orphan"}]}}`+"\n"),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lines := h.serve(t,
+		cmd("resume_session", map[string]any{"id": "blank", "sessionPath": "   "}),
+		cmd("resume_session", map[string]any{"id": "bad", "sessionPath": headerless}),
+		cmd("get_state", map[string]any{"id": "alive"}),
+	)
+	blank := response(t, lines, "resume_session")
+	if blank["success"] != false {
+		t.Error("a blank sessionPath must be rejected")
+	} else if msg, _ := blank["error"].(string); msg != "sessionPath is required" {
+		t.Errorf("error = %q, want the wire-contract message", msg)
+	}
+	bad := nthResponse(t, lines, "resume_session", 1)
+	if bad["success"] != false {
+		t.Error("an invalid session file must be rejected")
+	} else if msg, _ := bad["error"].(string); !strings.Contains(msg, "not a valid session file") {
+		t.Errorf("error = %q, want the open failure", msg)
+	}
+	// A failed resume leaves the live session untouched and the loop
+	// serving: the swap never happened, so nothing to rebind away from.
+	// (sessionFile is omitempty, so an in-memory session reports the key
+	// absent — a failed resume must not have put a path there.)
+	if sf, _ := dataMap(t, response(t, lines, "get_state"))["sessionFile"].(string); sf != "" {
+		t.Errorf("sessionFile = %q, want the live in-memory session untouched", sf)
 	}
 }
 

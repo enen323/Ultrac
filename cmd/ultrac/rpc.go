@@ -62,7 +62,7 @@ func newRPCHost(h *harness, runCtx context.Context) *rpcHost {
 		runCtx:  runCtx,
 		persist: !h.flags.NoTranscript,
 	}
-	host.agent = h.newAgent(h.mgr, h.flags.Continue)
+	host.agent = h.newAgent(h.mgr, h.seed, h.flags.Continue)
 	host.mgr = h.mgr
 	if !h.flags.Continue {
 		// A resumed session already carries its metadata; a fresh one
@@ -131,7 +131,73 @@ func (host *rpcHost) NewSession(parentSession string) {
 	// case only).
 	host.h.recordSessionMeta(mgr)
 	host.mgr = mgr
-	host.agent = host.h.newAgent(mgr, false)
+	host.agent = host.h.newAgent(mgr, session.SessionContext{}, false)
+}
+
+// ListSessions summarizes the transcripts for the harness cwd — the
+// host's knowledge is the cwd; the session package owns the layout.
+func (host *rpcHost) ListSessions() ([]session.SessionSummary, error) {
+	return session.ListSessions(host.h.cwd)
+}
+
+// ResumeSession swaps the live agent and session to the transcript at
+// path: the same abort→swap shape as NewSession, but loading an existing
+// file instead of creating one.
+//
+// This is the semantic twin of pi's switch_session
+// (agent-session-runtime.ts:196-224: open the file, tear down the current
+// runtime, apply a fresh one over the loaded manager). Two deliberate
+// differences, both forced by what this port's resume can and cannot do:
+//
+//   - No cwd re-rooting. pi rebuilds the whole runtime around the
+//     session's recorded cwd (and hard-errors when that directory is
+//     gone, session-cwd.ts). Here the tools, the project settings layer
+//     and the session directory were all bound to the harness cwd at
+//     startup, so a resume keeps the process cwd; the summary's cwd field
+//     (list_sessions) is what lets a client surface a mismatch instead of
+//     silently running tools somewhere else.
+//   - No session_start event. The event vocabulary this port emits is the
+//     agent-level set; a session-level resume event would be a new wire
+//     concept for a single client.
+//
+// The model and thinking level come from the file, the same fallback
+// buildHarness applies on --continue: the session's last recorded model
+// wins over the harness's current one (the conversation was held with
+// it). The gate is set_model's own rule — the model must be one this
+// process can select — because resolveModel does not fail on an unknown
+// provider/id, and switching to a phantom would only surface as a failed
+// request later; an unselectable name keeps the harness's working model
+// and the client can set_model afterwards.
+func (host *rpcHost) ResumeSession(path string) error {
+	// Abort the current run first — and deliberately without holding the
+	// lock, for the same deadlock reason NewSession documents.
+	old := host.Agent()
+	old.Abort()
+	waitCtx, cancel := context.WithTimeout(context.Background(), settleWait)
+	defer cancel()
+	_ = old.WaitForIdle(waitCtx)
+
+	mgr, err := session.OpenSession(path)
+	if err != nil {
+		return err
+	}
+	seed := mgr.BuildSessionContext()
+	if seed.Model != nil {
+		if m, err := resolveModel(seed.Model.Provider+"/"+seed.Model.ModelID, host.h.flags.API, host.h.effective); err == nil &&
+			containsModel(host.h.availableModels(), m) {
+			host.h.model = m
+		}
+	}
+
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	// No recordSessionMeta: the file already carries its own model_change
+	// and thinking_level_change entries (it was created by a run that
+	// wrote them), and appending fresh ones would rewrite history the
+	// resume is supposed to restore — the same skip --continue makes.
+	host.mgr = mgr
+	host.agent = host.h.newAgent(mgr, seed, true)
+	return nil
 }
 
 // SetModel validates the selection against the available models, applies

@@ -25,7 +25,10 @@
 // get_state, set_model, get_available_models, set_thinking_level,
 // get_available_thinking_levels, set_steering_mode, set_follow_up_mode,
 // get_messages, get_last_assistant_text, set_session_name, get_entries,
-// get_commands.
+// get_commands, list_sessions, resume_session.
+//
+// list_sessions and resume_session are Ultrac extensions beyond pi's set
+// (types.go explains why and what pi's switch_session would have been).
 //
 // Not implemented (rpc-types.ts has them; this port does not): compact,
 // set_auto_compaction, set_auto_retry, abort_retry, bash, abort_bash,
@@ -76,6 +79,18 @@ type Host interface {
 	// aborting any active run first (bounded wait). parentSession links the
 	// new transcript to its parent in the header.
 	NewSession(parentSession string)
+
+	// ListSessions summarizes the session files for the host's cwd,
+	// newest first — what a client's session sidebar renders. An error is
+	// a listing failure (an unreadable sessions directory), which the
+	// server turns into an error response.
+	ListSessions() ([]session.SessionSummary, error)
+	// ResumeSession swaps the live agent and session to an existing
+	// transcript at path, aborting any active run first (bounded wait) —
+	// the same abort→swap shape as NewSession, but loading instead of
+	// creating. The error is the load failing (a missing or invalid
+	// file); the host leaves the live pair untouched in that case.
+	ResumeSession(path string) error
 
 	// SetModel validates provider/modelId against AvailableModels, applies
 	// it, and persists a model_change entry. The error message is what the
@@ -244,6 +259,10 @@ func (s *Server) dispatch(cmd RpcCommand) (RpcResponse, func()) {
 		return s.cmdClearQueue(cmd), nil
 	case CmdNewSession:
 		return s.cmdNewSession(cmd), nil
+	case CmdListSessions:
+		return s.cmdListSessions(cmd), nil
+	case CmdResumeSession:
+		return s.cmdResumeSession(cmd), nil
 	case CmdGetState:
 		return s.cmdGetState(cmd), nil
 	case CmdSetModel:
@@ -374,6 +393,40 @@ func (s *Server) cmdNewSession(cmd RpcCommand) RpcResponse {
 	s.host.NewSession(cmd.ParentSession)
 	s.rebind()
 	return successResponse(cmd.ID, CmdNewSession, map[string]any{"cancelled": false})
+}
+
+func (s *Server) cmdListSessions(cmd RpcCommand) RpcResponse {
+	// The listing is the host's: it owns the cwd the sessions belong to.
+	// An empty list is a success with an empty array — a project that has
+	// never chatted has nothing to show, which is not an error.
+	sessions, err := s.host.ListSessions()
+	if err != nil {
+		return errorResponse(cmd.ID, CmdListSessions, err.Error())
+	}
+	if sessions == nil {
+		sessions = []session.SessionSummary{}
+	}
+	return successResponse(cmd.ID, CmdListSessions, map[string]any{"sessions": sessions})
+}
+
+func (s *Server) cmdResumeSession(cmd RpcCommand) RpcResponse {
+	// The path is the wire contract: the client got it from
+	// list_sessions (or get_state's sessionFile). A blank one is a
+	// malformed command, not a missing file — answering with the host's
+	// open error would blame the filesystem for an empty request.
+	if strings.TrimSpace(cmd.SessionPath) == "" {
+		return errorResponse(cmd.ID, CmdResumeSession, "sessionPath is required")
+	}
+	if err := s.host.ResumeSession(cmd.SessionPath); err != nil {
+		return errorResponse(cmd.ID, CmdResumeSession, err.Error())
+	}
+	// The pump follows the swap exactly as it does after new_session:
+	// without the rebind, the next run's events would go to the abandoned
+	// agent's subscribers and the client would see nothing.
+	s.rebind()
+	// cancelled mirrors new_session / pi's switch_session: the confirm
+	// dialog that could cancel a switch does not exist here.
+	return successResponse(cmd.ID, CmdResumeSession, map[string]any{"cancelled": false})
 }
 
 func (s *Server) cmdGetState(cmd RpcCommand) RpcResponse {

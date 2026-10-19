@@ -80,10 +80,14 @@ type RpcCommand struct {
 
 	// set_session_name
 	Name string `json:"name,omitempty"`
+
+	// resume_session (Ultrac extension — see the command-set note on the
+	// constants below)
+	SessionPath string `json:"sessionPath,omitempty"`
 }
 
 // Command types. The closed set this port implements; anything else is
-// unknown (rpc-types.ts:20-74 has the full list).
+// unknown (rpc-types.ts:20-74 has pi's full list).
 const (
 	CmdPrompt               = "prompt"
 	CmdSteer                = "steer"
@@ -103,7 +107,18 @@ const (
 	CmdSetSessionName       = "set_session_name"
 	CmdGetEntries           = "get_entries"
 	CmdGetCommands          = "get_commands"
-	cmdParse                = "parse" // not a command: the parse-error response
+	// CmdListSessions and CmdResumeSession are Ultrac extensions beyond
+	// pi's command set: the desktop shell's session sidebar needs to
+	// enumerate and reopen transcripts (docs/desktop-shell-plan.md §1,
+	// P-D0), and pi's RPC has no list — its only session-switching command
+	// is switch_session, which stays unimplemented here because the
+	// runtime-replacement machinery it belongs to (trust contexts, the
+	// before-switch dialog, session_start events) is a non-goal. Adding
+	// commands rather than changing existing ones is what keeps the wire
+	// compatible: every other command's shape is untouched.
+	CmdListSessions  = "list_sessions"
+	CmdResumeSession = "resume_session"
+	cmdParse         = "parse" // not a command: the parse-error response
 )
 
 // Dispositions a prompt-shaped command reports.

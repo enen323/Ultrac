@@ -127,7 +127,7 @@ func (ps *printSession) run() int {
 	defer stopWatch()
 
 	// -- 5. Agent -------------------------------------------------------------
-	a := h.newAgent(mgr, f.Continue)
+	a := h.newAgent(mgr, h.seed, f.Continue)
 
 	// -- 6. Output surfaces ----------------------------------------------------
 	jsonMode := f.Mode == "json"

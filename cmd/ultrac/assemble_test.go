@@ -36,7 +36,7 @@ func testHarness(t *testing.T) *harness {
 func TestBuildPromptPatchLifecycle(t *testing.T) {
 	h := testHarness(t)
 	mgr := session.InMemorySession(h.cwd)
-	a := h.newAgent(mgr, false)
+	a := h.newAgent(mgr, session.SessionContext{}, false)
 
 	// First prompt: the transcript declares no sections yet, so the patch
 	// carries the whole sectioned prompt.
@@ -61,7 +61,7 @@ func TestBuildPromptPatchLifecycle(t *testing.T) {
 		TimestampMS: time.Now().UnixMilli(),
 	}
 	h.seed = session.SessionContext{Messages: []ai.Message{*in1.Patch, in1.User, assistant}}
-	a2 := h.newAgent(mgr, true)
+	a2 := h.newAgent(mgr, h.seed, true)
 
 	// Second prompt, nothing changed: the diff is empty and no system
 	// message is appended (pi: system-prompt.ts:217-229).
