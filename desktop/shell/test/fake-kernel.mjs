@@ -16,6 +16,7 @@
  *   exit-early              die immediately, before reading anything
  *   hold-open               answer the probe, then live until stdin EOF (exit 0)
  *   framing                 answer the probe in crafted chunks (U+2028, CRLF, splits)
+ *   boot-events             answer the probe, then push one message_start/agent_end pair
  *
  * The fake keeps the protocol honest: strict \n-only framing on input, ids
  * echoed on output, nothing written until asked.
@@ -84,6 +85,7 @@ function respondTo(cmd) {
 const reverseQueue = [];
 let answeredHoldOpen = false;
 let framingDone = false;
+let bootEventsSent = false;
 
 function handleLine(line) {
   let cmd;
@@ -129,6 +131,19 @@ function handleLine(line) {
       if (framingDone) break;
       framingDone = true;
       writeFramedAnswer(cmd);
+      break;
+    case "boot-events":
+      respondTo(cmd);
+      // One turn, once — a real kernel pushes events when a turn happens,
+      // not per get_state (the shell's power guard polls get_state too, and
+      // a kernel that answered each poll with a turn would be a very odd
+      // kernel indeed).
+      if (cmd.type === "get_state" && !bootEventsSent) {
+        bootEventsSent = true;
+        setTimeout(() => writeLine({ type: "message_start", message: { role: "assistant" } }), 10);
+        setTimeout(() => writeLine({ type: "message_update", usage: '{"inputTokens":1}', assistantMessageEvent: { type: "content_block_delta", delta: { text: "hi" } } }), 20);
+        setTimeout(() => writeLine({ type: "agent_end" }), 40);
+      }
       break;
     default:
       respondTo(cmd);
