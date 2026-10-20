@@ -73,7 +73,7 @@ async function runShell(scenario: string, readyTimeoutMs = 8000): Promise<{ repo
   return { report, stderr, code };
 }
 
-test("the boot spawns, probes, opens the placeholder page, bridges, and honours the lease", async () => {
+test("the boot spawns, probes, opens the page, bridges, and honours the lease", async () => {
   const { report, stderr, code } = await runShell("boot-events");
   assert.ok(report, `the stub child wrote no report; stderr:\n${stderr}`);
   assert.equal(report.exit?.why, null, `the boot did not settle cleanly: ${report.exit?.why}`);
@@ -86,12 +86,20 @@ test("the boot spawns, probes, opens the placeholder page, bridges, and honours 
   assert.equal(report.sessionLoaded?.model?.id, "fake-model");
   assert.equal(report.sessionLoaded?.messageCount, 1);
 
-  // The window: shown, with the real preload, on the placeholder page (the
-  // SPA is P-S2 and its dist does not exist yet).
+  // The window: shown, with the real preload. Which page it holds depends on
+  // the P-S2 transition: with desktop/shell-spa/dist built the shell loads
+  // the real SPA (plan §4); without it, the placeholder holds the window
+  // (starting.ts missingPage). Both halves of loadPage's contract.
+  const spaIndex = path.join(here, "..", "..", "shell-spa", "dist", "index.html");
   assert.equal(report.window.shown, true);
   assert.match(report.window.preload ?? "", /preload\.cjs$/);
-  assert.equal(report.window.loadedFile, null);
-  assert.match(report.window.loadedUrl ?? "", /^data:text\/html/);
+  if (fs.existsSync(spaIndex)) {
+    assert.equal(report.window.loadedFile, spaIndex);
+    assert.equal(report.window.loadedUrl, null);
+  } else {
+    assert.equal(report.window.loadedFile, null);
+    assert.match(report.window.loadedUrl ?? "", /^data:text\/html/);
+  }
 
   // Events flow to the page, in order, id-less pushes and all.
   assert.deepEqual(
