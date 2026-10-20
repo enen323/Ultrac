@@ -1,0 +1,159 @@
+/*
+ * tokens.css — the page's design tokens. A distillation of Reasonix's
+ * styles/tokens.css (frontend-next): the same oklch palette families, the
+ * same light/dark structure (system preference plus an explicit data-theme
+ * override the page's own pref sets), the same radii and motion vocabulary.
+ * Cut to what a chat face uses — no pane widths, no docks, no chart tokens.
+ *
+ * The two font-face blocks Reasonix ships (Inter / Noto Sans SC / IBM Plex
+ * Mono woff2) are not reproduced: this page uses the system stacks the
+ * tokens fall back to, so there is nothing to download over file://.
+ */
+
+:root {
+  /* Surfaces — warm neutral in light, blue-neutral in dark (Reasonix's). */
+  --page: oklch(95.8% .0092 85);
+  --surface: oklch(98.9% .0046 85);
+  --raised: oklch(100% 0 85);
+  --overlay: oklch(93.1% .0138 85);
+  --sunk: oklch(95% .0092 85);
+  --code-face: oklch(97.6% .0057 85);
+  --border: oklch(87.6% .0184 85);
+  --hair: oklch(91.7% .0126 85);
+
+  /* Ink. */
+  --text: #292b29;
+  --muted: oklch(.41 .0207 85);
+  --faint: oklch(.475 .0207 85);
+
+  /* Accents and status. */
+  --accent: oklch(78% .135 78);
+  --accent-fg: oklch(28% .058 70);
+  --accent-wash: #fff2dc;
+  --net: oklch(50.8% .172 267);
+  --net-wash: oklch(94.8% .026 264);
+  --ok: oklch(51.9% .107 154);
+  --ok-wash: oklch(94.8% .026 154);
+  --err: oklch(54.2% .165 28);
+  --err-fg: #fff;
+  --err-wash: oklch(94.8% .026 28);
+  --warn: oklch(57.5% .118 45);
+  --warn-wash: oklch(94.8% .026 45);
+
+  /* Syntax (rehype-highlight's classes). */
+  --syn-key: oklch(47% .155 305);
+  --syn-str: oklch(45% .105 150);
+  --syn-num: oklch(50% .125 58);
+  --syn-fn: oklch(46% .135 255);
+  --syn-com: oklch(.475 .0207 85);
+
+  --float: oklch(100% 0 85);
+  --shadow-float:
+    inset 0 1px 0 rgb(255 255 255 / .9),
+    0 16px 40px -14px rgb(23 30 45 / .2),
+    0 4px 12px -8px rgb(23 30 45 / .14);
+
+  --mono: "IBM Plex Mono", ui-monospace, "Cascadia Code", "SF Mono", SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+  --ui: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", Arial, sans-serif;
+
+  --r-xs: 4px; --r-sm: 6px; --r-md: 9px; --r-lg: 12px; --r-pill: 999px;
+
+  --fs-micro: 11px; --fs-meta: 12px; --fs-ui: 13px;
+  --fs-lead: 15px; --fs-title: 17px;
+
+  --column: 760px;
+
+  --ease-out: cubic-bezier(.16, 1, .3, 1);
+  --t-line: .14s;
+  --m-line: var(--t-line) var(--ease-out);
+
+  --w-reg: 400; --w-med: 500; --w-semi: 600;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --page: oklch(14.4% .015 255);
+    --surface: oklch(18.1% .014 255);
+    --raised: oklch(22.3% .016 255);
+    --overlay: oklch(26.8% .018 255);
+    --sunk: oklch(14.2% .014 255);
+    --code-face: oklch(16.4% .015 255);
+    --border: oklch(32.4% .020 255);
+    --hair: oklch(24.2% .016 255);
+
+    --text: #e7e8e3;
+    --muted: #b4b7b0;
+    --faint: #8e9289;
+
+    --accent: #dda144;
+    --accent-fg: #171104;
+    --accent-wash: #201907;
+    --net: oklch(68.5% .118 262);
+    --net-wash: oklch(21% .028 262);
+    --ok: oklch(70.6% .120 155);
+    --ok-wash: oklch(21% .028 155);
+    --err: oklch(66.5% .150 27);
+    --err-fg: #1a0604;
+    --err-wash: oklch(21% .028 27);
+    --warn: oklch(75% .135 48);
+    --warn-wash: oklch(21% .028 48);
+
+    --syn-key: oklch(78% .125 305);
+    --syn-str: oklch(78% .105 150);
+    --syn-num: oklch(80% .105 58);
+    --syn-fn: oklch(76% .110 255);
+    --syn-com: #8e9289;
+
+    --float: oklch(25.5% .018 255);
+    --shadow-float:
+      inset 0 1px 0 rgb(255 255 255 / .06),
+      0 0 0 1px rgb(0 0 0 / .55),
+      0 22px 48px -14px rgb(0 0 0 / .8),
+      0 6px 18px -10px rgb(0 0 0 / .62);
+  }
+}
+
+:root[data-theme="dark"] {
+  --page: oklch(14.4% .015 255);
+  --surface: oklch(18.1% .014 255);
+  --raised: oklch(22.3% .016 255);
+  --overlay: oklch(26.8% .018 255);
+  --sunk: oklch(14.2% .014 255);
+  --code-face: oklch(16.4% .015 255);
+  --border: oklch(32.4% .020 255);
+  --hair: oklch(24.2% .016 255);
+
+  --text: #e7e8e3;
+  --muted: #b4b7b0;
+  --faint: #8e9289;
+
+  --accent: #dda144;
+  --accent-fg: #171104;
+  --accent-wash: #201907;
+  --net: oklch(68.5% .118 262);
+  --net-wash: oklch(21% .028 262);
+  --ok: oklch(70.6% .120 155);
+  --ok-wash: oklch(21% .028 155);
+  --err: oklch(66.5% .150 27);
+  --err-fg: #1a0604;
+  --err-wash: oklch(21% .028 27);
+  --warn: oklch(75% .135 48);
+  --warn-wash: oklch(21% .028 48);
+
+  --syn-key: oklch(78% .125 305);
+  --syn-str: oklch(78% .105 150);
+  --syn-num: oklch(80% .105 58);
+  --syn-fn: oklch(76% .110 255);
+  --syn-com: #8e9289;
+
+  --float: oklch(25.5% .018 255);
+  --shadow-float:
+    inset 0 1px 0 rgb(255 255 255 / .06),
+    0 0 0 1px rgb(0 0 0 / .55),
+    0 22px 48px -14px rgb(0 0 0 / .8),
+    0 6px 18px -10px rgb(0 0 0 / .62);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --m-line: none; }
+}

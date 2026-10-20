@@ -1,0 +1,4 @@
+# The toolchain arrives with P-S2 (plan §4); keep it out.
+node_modules/
+dist/
+.npmrc

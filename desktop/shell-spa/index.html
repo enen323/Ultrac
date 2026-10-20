@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ultrac</title>
+    <script>
+      // Pre-paint, for the same reason Reasonix's index.html does it: the boot
+      // screen below owns the window until the kernel answers, and a theme
+      // that arrives after the first paint would flash. The keys are the
+      // shell's own pref namespace (prefs.ts keeps them on disk), so the
+      // page writes them once and the shell restores them before any script
+      // runs.
+      (function () {
+        try {
+          var t = localStorage.getItem("ultrac-theme");
+          if (t === "dark" || t === "light") document.documentElement.dataset.theme = t;
+          var p = (localStorage.getItem("ultrac-lang") || "").trim().toLowerCase();
+          if (p === "en" || p === "zh") document.documentElement.lang = p === "en" ? "en" : "zh-CN";
+        } catch (e) {}
+      })();
+    </script>
+    <style>
+      /* The boot screen carries its own palette: tokens.css is a bundled
+         import that does not exist until the first render. Neutral dark
+         works on both themes because the overlay is short-lived. */
+      html, body { margin: 0; height: 100%; }
+      #boot {
+        position: fixed; inset: 0; display: grid; place-content: center;
+        gap: 14px; justify-items: center;
+        background: oklch(14.4% .015 255); color: oklch(93% .01 255);
+        font: 500 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+      }
+      #boot .mark { font-size: 22px; font-weight: 650; letter-spacing: -.02em; }
+      #boot .hint { opacity: .62; font-size: 13px; }
+      #boot[hidden] { display: none; }
+    </style>
+  </head>
+  <body>
+    <div id="boot"><span class="mark">Ultrac</span><span class="hint">正在连接内核…</span></div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
