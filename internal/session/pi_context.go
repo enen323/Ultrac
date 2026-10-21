@@ -255,3 +255,53 @@ func parseMillis(ts string) int64 {
 	}
 	return t.UnixMilli()
 }
+
+// ProjectedEntry pairs one context entry with the messages it contributes to
+// the model — pi's ProjectedSessionEntry (session-manager.ts:209-214).
+type ProjectedEntry struct {
+	// Source is the raw append-only entry.
+	Source *SessionEntry
+	// Messages is what this entry is allowed to say in context. Empty for
+	// state-only entries and for an older compaction retained inside a
+	// newer one's window.
+	Messages []ai.Message
+}
+
+// BuildProjection builds the compaction-aware projection over an entry path
+// (the caller passes a root-first path, e.g. GetBranch's result).
+//
+// pi: buildSessionProjection (session-manager.ts:543-570). The newest
+// compaction leads the result; an older compaction that sits inside its
+// retained range contributes nothing — without that rule a twice-compacted
+// session would replay both summaries into every request.
+//
+// This is the projection compaction planning runs on; BuildSessionContext
+// stays the flattened form for the agent loop.
+func BuildProjection(path []*SessionEntry) []ProjectedEntry {
+	entries := contextEntries(path)
+	out := make([]ProjectedEntry, len(entries))
+	for i, e := range entries {
+		if e.Type == TypeCompaction && i > 0 {
+			out[i] = ProjectedEntry{Source: e}
+			continue
+		}
+		out[i] = ProjectedEntry{Source: e, Messages: contextMessages([]*SessionEntry{e})}
+	}
+	return out
+}
+
+// ProjectedMessages flattens a projection into the message list it requests.
+func ProjectedMessages(projected []ProjectedEntry) []ai.Message {
+	var out []ai.Message
+	for _, pe := range projected {
+		out = append(out, pe.Messages...)
+	}
+	return out
+}
+
+// EntryContextMessages returns the context messages one entry contributes —
+// the per-entry form of the projection (pi's sessionEntryToContextMessages,
+// session-manager.ts:439-466).
+func EntryContextMessages(e *SessionEntry) []ai.Message {
+	return contextMessages([]*SessionEntry{e})
+}

@@ -14,7 +14,8 @@
 //     tracks the tip, and context is rebuilt by walking parent links — never
 //     by trusting file order (plan R7).
 //   - Compaction-aware context projection (buildContextEntries), so a file pi
-//     compacted rebuilds the same context here.
+//     compacted rebuilds the same context here — and AppendCompaction, the
+//     writer for the compaction entries that projection reads (P-C1).
 //
 // # What is deliberately not ported (yet)
 //
@@ -311,6 +312,93 @@ func (m *SessionManager) AppendModelChange(provider, modelID string) (string, er
 	e.Provider = provider
 	e.ModelID = modelID
 	return e.ID, m.persistLocked(e)
+}
+
+// CompactionDetails is the file-tracking payload a compaction entry carries in
+// its details (pi's CompactionDetails, compaction.ts:51-54). It lives here,
+// not in the compact package, because the writer needs the type and the
+// reader already interprets it — keeping it in session avoids an import cycle
+// (compact depends on session, never the reverse).
+type CompactionDetails struct {
+	ReadFiles     []string `json:"readFiles"`
+	ModifiedFiles []string `json:"modifiedFiles"`
+}
+
+// AppendCompaction appends a compaction summary as a child of the current
+// leaf, then advances the leaf. Returns the entry id.
+//
+// pi: appendCompaction (session-manager.ts:1261-1286). Every type-specific
+// field rides in Extra: the reader (pi_context.go) already interprets these
+// keys, and MarshalEntry merges them back out under pi's exact names, so the
+// line written here is the line pi would have written (plan D3).
+//
+// details and usage are nil-able the way pi's optional parameters are: an
+// absent value must stay absent on disk rather than become a JSON null.
+//
+// systemMessage is the boundary snapshot — the complete system prompt state
+// at compression time. pi computes it inside appendCompaction from the
+// session's own projection; the caller passes it here so the snapshot can be
+// taken before this entry exists (the entry itself must not see itself).
+func (m *SessionManager) AppendCompaction(
+	summary, firstKeptEntryID string,
+	tokensBefore int,
+	details *CompactionDetails,
+	systemMessage *ai.Message,
+	usage *ai.Usage,
+) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.appendLocked(TypeCompaction)
+	// A null firstKeptEntryId means "keep nothing before this entry". pi
+	// substitutes the entry's own id; the reader's kept-prefix scan then
+	// never meets it, which drops the whole prefix (session-manager.ts:1275).
+	kept := firstKeptEntryID
+	if kept == "" {
+		kept = e.ID
+	}
+	setExtra(e, "summary", mustExtraJSON(summary))
+	setExtra(e, "firstKeptEntryId", mustExtraJSON(kept))
+	setExtra(e, "tokensBefore", mustExtraJSON(tokensBefore))
+	if details != nil {
+		setExtra(e, "details", mustExtraJSON(details))
+	}
+	if usage != nil {
+		setExtra(e, "usage", mustExtraJSON(usage))
+	}
+	if systemMessage != nil {
+		// The snapshot is stamped with the compaction's own timestamp, the
+		// way pi spreads it (session-manager.ts:1277): the captured prompt
+		// reads as "the prompt at this boundary", not the prompt's birth.
+		snapshot := *systemMessage
+		snapshot.TimestampMS = parseISO(e.Timestamp).UnixMilli()
+		raw, err := json.Marshal(snapshot)
+		if err != nil {
+			return "", fmt.Errorf("session: encode compaction systemMessage: %w", err)
+		}
+		setExtra(e, "systemMessage", raw)
+	}
+	return e.ID, m.persistLocked(e)
+}
+
+// setExtra writes one Extra key, initialising the map on first use —
+// appendLocked builds entries without one.
+func setExtra(e *SessionEntry, key string, raw json.RawMessage) {
+	if e.Extra == nil {
+		e.Extra = make(map[string]json.RawMessage)
+	}
+	e.Extra[key] = raw
+}
+
+// mustExtraJSON encodes a value whose encoder is total (string, int, string
+// slices, the scalar Usage). A failure would be a programming error, and
+// appending half an entry to an append-only file is worse than refusing —
+// the same reasoning as mustMarshalEntry.
+func mustExtraJSON(v any) json.RawMessage {
+	data, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return data
 }
 
 // AppendThinkingLevelChange records a thinking-level switch (pi's

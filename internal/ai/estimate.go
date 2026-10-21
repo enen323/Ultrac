@@ -27,6 +27,33 @@ const (
 // messages after it need estimating. Estimating everything from characters
 // after a real count is available would throw that accuracy away.
 func EstimateContextTokens(messages []Message) int {
+	return EstimateContextTokensDetailed(messages).Tokens
+}
+
+// ContextEstimate is the detailed form of EstimateContextTokens's result:
+// the split between the exact usage prefix and the estimated tail, plus the
+// index the usage anchored at.
+//
+// pi: ContextUsageEstimate (compaction.ts:177-182). Compaction's projected
+// estimate needs lastUsageIndex to decide whether a later compaction
+// invalidated the captured usage (compaction.ts:226-262); the plain token
+// total cannot answer that.
+type ContextEstimate struct {
+	// Tokens is the estimated context size.
+	Tokens int
+	// UsageTokens is the part carried by the anchoring assistant usage.
+	UsageTokens int
+	// TrailingTokens is the estimated part after that usage.
+	TrailingTokens int
+	// LastUsageIndex is the message index the usage came from, or -1 when
+	// no usable assistant usage exists in the transcript.
+	LastUsageIndex int
+}
+
+// EstimateContextTokensDetailed is EstimateContextTokens with its working
+// exposed. The index follows the same selection as the total: the latest
+// applicable assistant usage under the monotonic-timestamp guard.
+func EstimateContextTokensDetailed(messages []Message) ContextEstimate {
 	usageIdx := -1
 	var usageTokens int
 	latestPrefix := int64(math.MinInt64)
@@ -50,13 +77,30 @@ func EstimateContextTokens(messages []Message) int {
 		for i := usageIdx + 1; i < len(messages); i++ {
 			trailing += estimateMessageTokens(messages[i])
 		}
-		return usageTokens + trailing
+		return ContextEstimate{
+			Tokens:         usageTokens + trailing,
+			UsageTokens:    usageTokens,
+			TrailingTokens: trailing,
+			LastUsageIndex: usageIdx,
+		}
 	}
 	total := 0
 	for _, m := range messages {
 		total += estimateMessageTokens(m)
 	}
-	return total
+	return ContextEstimate{Tokens: total, TrailingTokens: total, LastUsageIndex: -1}
+}
+
+// EstimateMessageTokens estimates the token count of one message with the
+// same 3.5 chars/token heuristic as EstimateContextTokens.
+//
+// Exported for compaction's cut-point walk, which accumulates per-message
+// estimates from newest to oldest (pi: estimateTokens, compaction.ts:298-349
+// — pi carries a private copy of the same estimator there; Ultrac keeps one
+// estimator for the whole repo, so the compaction line and the request clamp
+// can never disagree about what a message costs).
+func EstimateMessageTokens(m Message) int {
+	return estimateMessageTokens(m)
 }
 
 func usageTotal(u *Usage) int {
