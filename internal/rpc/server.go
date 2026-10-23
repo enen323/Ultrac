@@ -25,20 +25,22 @@
 // get_state, set_model, get_available_models, set_thinking_level,
 // get_available_thinking_levels, set_steering_mode, set_follow_up_mode,
 // get_messages, get_last_assistant_text, set_session_name, get_entries,
-// get_commands, list_sessions, resume_session.
+// get_commands, list_sessions, resume_session, compact,
+// set_auto_compaction.
 //
 // list_sessions and resume_session are Ultrac extensions beyond pi's set
-// (types.go explains why and what pi's switch_session would have been).
+// (types.go explains why and what pi's switch_session would have been);
+// compact and set_auto_compaction are pi's own, landed with P-C2 of
+// docs/compaction-branch-plan.md.
 //
-// Not implemented (rpc-types.ts has them; this port does not): compact,
-// set_auto_compaction, set_auto_retry, abort_retry, bash, abort_bash,
-// export_html, switch_session, fork, clone, get_fork_messages, get_tree,
+// Not implemented (rpc-types.ts has them; this port does not):
+// set_auto_retry, abort_retry, bash, abort_bash, export_html,
+// switch_session, fork, clone, get_fork_messages, get_tree,
 // get_session_stats, cycle_model, cycle_thinking_level, and the
 // extension_ui_* pair. They fall through to the unknown-command branch
-// with a clear error rather than being silently dropped — compaction and
-// the branch tree are non-goals (plan §2.2 / §3.5), and a client that
-// sends one learns it is unsupported instead of waiting for a response
-// that never comes.
+// with a clear error rather than being silently dropped — the branch tree
+// is P-C3/P-C4 of the compaction plan, and a client that sends one learns
+// it is unsupported instead of waiting for a response that never comes.
 package rpc
 
 import (
@@ -114,6 +116,27 @@ type Host interface {
 	// is the prompt build failing; the server turns it into an error
 	// response rather than sending a degraded prompt.
 	BuildPrompt(text string, images []ImageContent) (PromptInput, error)
+
+	// Compact runs a manual compaction: the host aborts any active run
+	// first (bounded wait), then plans, summarizes and appends the
+	// checkpoint, and swaps the agent's context to the compressed
+	// projection (pi: agent-session.ts:2789-2909). The error is the
+	// compaction failing — including pi's idempotence errors "Already
+	// compacted" and "Nothing to compact (session too small)", which the
+	// server surfaces verbatim so a client can tell them apart from a
+	// summarization failure.
+	Compact(customInstructions string) (*CompactResult, error)
+	// SetAutoCompaction persists the auto-compaction gate to the user
+	// settings layer and applies it to the live session (pi:
+	// setAutoCompactionEnabled + settings-manager persistence). The error
+	// is the settings write failing; the live gate stays untouched then.
+	SetAutoCompaction(enabled bool) error
+	// IsCompacting reports whether a compaction (automatic or manual) is
+	// running right now (pi: agent-session.ts:1627-1633).
+	IsCompacting() bool
+	// AutoCompactionEnabled reports the resolved auto-compaction gate —
+	// the settings value, not the runtime state.
+	AutoCompactionEnabled() bool
 }
 
 // PromptInput is one prompt command's assembled messages.
@@ -287,6 +310,10 @@ func (s *Server) dispatch(cmd RpcCommand) (RpcResponse, func()) {
 		return s.cmdGetEntries(cmd), nil
 	case CmdGetCommands:
 		return s.cmdGetCommands(cmd), nil
+	case CmdCompact:
+		return s.cmdCompact(cmd), nil
+	case CmdSetAutoCompaction:
+		return s.cmdSetAutoCompaction(cmd), nil
 	default:
 		// Unknown command: a clear error, never a crash (plan DoD). This is
 		// also where every pi command this port deliberately does not
@@ -438,13 +465,13 @@ func (s *Server) cmdGetState(cmd RpcCommand) RpcResponse {
 		Model:                 &model,
 		ThinkingLevel:         string(state.ThinkingLevel),
 		IsStreaming:           state.IsStreaming,
-		IsCompacting:          false, // compaction is a non-goal (plan §2.2)
+		IsCompacting:          s.host.IsCompacting(),
 		SteeringMode:          string(a.SteeringMode()),
 		FollowUpMode:          string(a.FollowUpMode()),
 		SessionFile:           mgr.SessionFile(),
 		SessionID:             mgr.SessionID(),
 		SessionName:           mgr.SessionName(),
-		AutoCompactionEnabled: false, // ditto
+		AutoCompactionEnabled: s.host.AutoCompactionEnabled(),
 		MessageCount:          len(state.Messages),
 		PendingMessageCount:   len(a.SteeringMessages()) + len(a.FollowUpMessages()),
 	})
@@ -524,6 +551,35 @@ func (s *Server) cmdGetCommands(cmd RpcCommand) RpcResponse {
 	// Returning the empty list is the honest answer; a client polling for
 	// slash commands learns there are none.
 	return successResponse(cmd.ID, CmdGetCommands, map[string]any{"commands": []any{}})
+}
+
+// ---------------------------------------------------------------------------
+// Compaction
+// ---------------------------------------------------------------------------
+
+func (s *Server) cmdCompact(cmd RpcCommand) RpcResponse {
+	// The host owns the abort-then-compress ordering (pi: compact() awaits
+	// this.abort() first, agent-session.ts:2790), so the command is a
+	// straight delegation: the response is the CompactionResult, or the
+	// failure verbatim — including the idempotence errors, which are the
+	// client's signal that the session was already compacted.
+	result, err := s.host.Compact(cmd.CustomInstructions)
+	if err != nil {
+		return errorResponse(cmd.ID, CmdCompact, err.Error())
+	}
+	return successResponse(cmd.ID, CmdCompact, result)
+}
+
+func (s *Server) cmdSetAutoCompaction(cmd RpcCommand) RpcResponse {
+	// pi types enabled as a required boolean; a missing one is a malformed
+	// command, not a request to disable.
+	if cmd.Enabled == nil {
+		return errorResponse(cmd.ID, CmdSetAutoCompaction, "enabled is required")
+	}
+	if err := s.host.SetAutoCompaction(*cmd.Enabled); err != nil {
+		return errorResponse(cmd.ID, CmdSetAutoCompaction, err.Error())
+	}
+	return successResponse(cmd.ID, CmdSetAutoCompaction, nil)
 }
 
 // ---------------------------------------------------------------------------

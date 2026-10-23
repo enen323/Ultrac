@@ -34,6 +34,7 @@ import (
 
 	"ultrac/internal/agent"
 	"ultrac/internal/ai"
+	"ultrac/internal/config"
 	"ultrac/internal/rpc"
 	"ultrac/internal/session"
 	"ultrac/internal/transport"
@@ -267,6 +268,49 @@ func (host *rpcHost) BuildPrompt(text string, images []rpc.ImageContent) (rpc.Pr
 	return host.h.buildPrompt(host.Agent(), text, images)
 }
 
+// Compact runs a manual compaction over the live pair (pi: rpc-mode.ts:533
+// → agent-session.compact). The executor owns the abort-first ordering; the
+// run context is what makes a termination signal cancel an in-flight
+// summarization instead of delaying exit.
+func (host *rpcHost) Compact(customInstructions string) (*rpc.CompactResult, error) {
+	return host.h.compactor.Compact(host.runCtx, customInstructions)
+}
+
+// SetAutoCompaction persists the gate to the user settings layer — pi's
+// setAutoCompactionEnabled writes global settings the same way (plan D6) —
+// then flips the live executor. A failed write leaves the live gate
+// untouched: the file and the running session must not disagree about
+// whether auto-compaction is on.
+func (host *rpcHost) SetAutoCompaction(enabled bool) error {
+	err := host.h.resolver.Update(context.Background(), config.SourceUser, host.h.cwd, func(s *config.Settings) error {
+		section := s.Compaction
+		if section == nil {
+			section = &config.CompactionSettings{}
+		}
+		// Copy-then-assign: Update hands us the file's own contents, and
+		// writing through the shared pointer would alias whatever the
+		// layer cache still holds.
+		next := *section
+		next.Enabled = &enabled
+		s.Compaction = &next
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	// Two writes, one intent: the live executor flips now, and the
+	// harness's resolved copy flips too — a new_session rebuilds the
+	// executor FROM that copy, so updating only the live one would silently
+	// revert the gate on the next session swap.
+	host.h.compaction.Enabled = enabled
+	host.h.compactor.SetEnabled(enabled)
+	return nil
+}
+
+func (host *rpcHost) IsCompacting() bool { return host.h.compactor.IsCompacting() }
+
+func (host *rpcHost) AutoCompactionEnabled() bool { return host.h.compactor.AutoEnabled() }
+
 // -- entry point -----------------------------------------------------------------
 
 // runRPC is the CLI entry for --mode rpc.
@@ -290,6 +334,11 @@ func runRPC(f *agentFlags, stdin io.Reader, stdout, stderr io.Writer) int {
 	defer stopWatch()
 
 	writer := transport.NewPiJSONWriter(stdout)
+	// The compaction executor emits through the same writer the event pump
+	// uses, so compaction events interleave with the run's events in wire
+	// order instead of racing them (plan D4). Set before the host builds
+	// its first agent — the hook closure captures this sink.
+	h.emitEvent = writer.WriteEvent
 	host := newRPCHost(h, ctx)
 	server := rpc.NewServer(host, writer)
 	defer server.Close()

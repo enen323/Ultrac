@@ -58,6 +58,22 @@ type testHost struct {
 	// listing lives in the session package and is tested there.
 	listSessions []session.SessionSummary
 	listErr      error
+
+	// compactResult / compactErr back the Compact method: canned data for
+	// the protocol-shape tests, an error for the failure path. The real
+	// compaction (plan → summarize → append → swap) is cmd/ultrac's, tested
+	// there against the real harness; what is under test here is the
+	// command's wire contract.
+	compactResult *CompactResult
+	compactErr    error
+	compactCalls  []string // customInstructions per call, in order
+
+	// autoCompaction is the gate: SetAutoCompaction records and (unless
+	// setAutoErr fires) applies it, get_state reports it back.
+	autoCompaction bool
+	setAutoErr     error
+	setAutoCalls   []bool
+	compacting     bool
 }
 
 func newTestHost(t *testing.T, scripts ...[]ai.AssistantEvent) *testHost {
@@ -233,6 +249,9 @@ func (h *testHost) SetSessionName(name string) error {
 	return err
 }
 
+// BuildPrompt serves the user message alone — the harness's sections patch
+// is cmd/ultrac's job (tested there); the protocol layer looks only at the
+// user message.
 func (h *testHost) BuildPrompt(text string, images []ImageContent) (PromptInput, error) {
 	blocks := []ai.ContentBlock{ai.TextBlock(text)}
 	for _, img := range images {
@@ -243,6 +262,41 @@ func (h *testHost) BuildPrompt(text string, images []ImageContent) (PromptInput,
 		Content:     blocks,
 		TimestampMS: time.Now().UnixMilli(),
 	}}, nil
+}
+
+// Compact serves the canned result/error and records the instructions it was
+// given, so the protocol tests can assert both the response shape and that
+// the custom focus reached the host.
+func (h *testHost) Compact(customInstructions string) (*CompactResult, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.compactCalls = append(h.compactCalls, customInstructions)
+	return h.compactResult, h.compactErr
+}
+
+// SetAutoCompaction records the gate and applies it unless the canned error
+// fires — in which case the live gate must stay untouched.
+func (h *testHost) SetAutoCompaction(enabled bool) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.setAutoErr != nil {
+		return h.setAutoErr
+	}
+	h.setAutoCalls = append(h.setAutoCalls, enabled)
+	h.autoCompaction = enabled
+	return nil
+}
+
+func (h *testHost) IsCompacting() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.compacting
+}
+
+func (h *testHost) AutoCompactionEnabled() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.autoCompaction
 }
 
 // ListSessions serves the canned summaries, mirroring what the real host
@@ -925,6 +979,156 @@ func TestGetStateShape(t *testing.T) {
 	}
 	if _, has := sd["sessionName"]; has {
 		t.Error("sessionName must be absent, not empty, before one is set")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Compaction commands (P-C2: docs/compaction-branch-plan.md)
+//
+// The real compaction (plan → summarize → append → swap) is cmd/ultrac's,
+// tested there against the real harness. What is under test here is the
+// wire contract: the response shapes, the required-argument guard, and
+// get_state's two live fields.
+// ---------------------------------------------------------------------------
+
+func TestCompactCommandShape(t *testing.T) {
+	h := newTestHost(t)
+	h.compactResult = &CompactResult{
+		Summary:              "## Goal\nship it",
+		FirstKeptEntryID:     "entry-42",
+		TokensBefore:         182340,
+		EstimatedTokensAfter: 24110,
+		Usage:                ai.Usage{Input: 12345, Output: 678, TotalTokens: 13023},
+		Details:              session.CompactionDetails{ReadFiles: []string{"go.mod"}, ModifiedFiles: []string{"main.go"}},
+	}
+
+	lines := h.serve(t, cmd("compact", map[string]any{
+		"id":                 "c1",
+		"customInstructions": "keep the deployment notes",
+	}))
+	r := response(t, lines, "compact")
+	if r["success"] != true {
+		t.Fatalf("compact = %v", r)
+	}
+	d := dataMap(t, r)
+	checks := map[string]any{
+		"summary":              "## Goal\nship it",
+		"firstKeptEntryId":     "entry-42",
+		"tokensBefore":         float64(182340),
+		"estimatedTokensAfter": float64(24110),
+	}
+	for k, want := range checks {
+		if d[k] != want {
+			t.Errorf("data[%q] = %v, want %v", k, d[k], want)
+		}
+	}
+	// usage and details ride along whole (pi's CompactionResult).
+	usage, _ := d["usage"].(map[string]any)
+	if usage == nil || usage["totalTokens"] != float64(13023) {
+		t.Errorf("data.usage = %v, want the summary call's usage", d["usage"])
+	}
+	details, _ := d["details"].(map[string]any)
+	if details == nil {
+		t.Fatalf("data.details = %v, want the file-operation lists", d["details"])
+	}
+	read, _ := details["readFiles"].([]any)
+	if len(read) != 1 || read[0] != "go.mod" {
+		t.Errorf("details.readFiles = %v, want [go.mod]", details["readFiles"])
+	}
+	// The custom focus reached the host (it is appended to the prompt by
+	// the engine; the command's job is to carry it).
+	if len(h.compactCalls) != 1 || h.compactCalls[0] != "keep the deployment notes" {
+		t.Errorf("customInstructions = %v, want the command's value", h.compactCalls)
+	}
+}
+
+func TestCompactCommandError(t *testing.T) {
+	// pi's idempotence errors surface verbatim: a client must be able to
+	// tell "already compacted" from a summarization failure.
+	for _, message := range []string{"Already compacted", "Nothing to compact (session too small)"} {
+		h := newTestHost(t)
+		h.compactErr = errors.New(message)
+		lines := h.serve(t, cmd("compact", map[string]any{"id": "c1"}))
+		r := response(t, lines, "compact")
+		if r["success"] != false {
+			t.Errorf("compact with %q: success = %v, want false", message, r["success"])
+		}
+		if got, _ := r["error"].(string); got != message {
+			t.Errorf("error = %q, want %q", got, message)
+		}
+		if _, has := r["data"]; has {
+			t.Error("an error response must not carry data")
+		}
+	}
+}
+
+func TestSetAutoCompactionCommand(t *testing.T) {
+	h := newTestHost(t)
+	lines := h.serve(t,
+		cmd("set_auto_compaction", map[string]any{"id": "s1", "enabled": true}),
+		cmd("get_state", map[string]any{"id": "after"}),
+	)
+	r := response(t, lines, "set_auto_compaction")
+	if r["success"] != true {
+		t.Fatalf("set_auto_compaction = %v", r)
+	}
+	if _, has := r["data"]; has {
+		t.Error("set_auto_compaction answers with no data (pi: success(id, cmd))")
+	}
+	// The gate flipped live: get_state reports the new value, and the host
+	// recorded the exact value it was asked for.
+	if got := dataMap(t, response(t, lines, "get_state"))["autoCompactionEnabled"]; got != true {
+		t.Errorf("autoCompactionEnabled after set = %v, want true", got)
+	}
+	if len(h.setAutoCalls) != 1 || h.setAutoCalls[0] != true {
+		t.Errorf("host recorded %v, want [true]", h.setAutoCalls)
+	}
+
+	// A missing enabled is a malformed command, not a request to disable:
+	// answering it with a silent "off" is how a client typo becomes a
+	// setting.
+	lines = h.serve(t, cmd("set_auto_compaction", map[string]any{"id": "s2"}))
+	bad := response(t, lines, "set_auto_compaction")
+	if bad["success"] != false {
+		t.Error("a missing enabled must fail")
+	}
+	if got, _ := bad["error"].(string); got != "enabled is required" {
+		t.Errorf("error = %q, want %q", got, "enabled is required")
+	}
+	if len(h.setAutoCalls) != 1 {
+		t.Error("a malformed command must not reach the host")
+	}
+}
+
+func TestSetAutoCompactionWriteFailureKeepsLiveGate(t *testing.T) {
+	h := newTestHost(t)
+	h.autoCompaction = true
+	h.setAutoErr = errors.New("config: refusing to write settings.json")
+	lines := h.serve(t, cmd("set_auto_compaction", map[string]any{"id": "s1", "enabled": false}))
+	r := response(t, lines, "set_auto_compaction")
+	if r["success"] != false {
+		t.Error("a failed settings write must surface as an error response")
+	}
+	if !strings.Contains(fmt.Sprint(r["error"]), "refusing to write") {
+		t.Errorf("error = %v, want the write failure", r["error"])
+	}
+	// The live gate is untouched: file and session must not disagree.
+	if !h.autoCompaction {
+		t.Error("the live gate flipped despite the failed write")
+	}
+}
+
+func TestGetStateReportsCompactionFields(t *testing.T) {
+	h := newTestHost(t)
+	h.compacting = true
+	h.autoCompaction = true
+	lines := h.serve(t, cmd("get_state", nil))
+	sd := dataMap(t, response(t, lines, "get_state"))
+	if sd["isCompacting"] != true {
+		t.Errorf("isCompacting = %v, want true", sd["isCompacting"])
+	}
+	if sd["autoCompactionEnabled"] != true {
+		t.Errorf("autoCompactionEnabled = %v, want true", sd["autoCompactionEnabled"])
 	}
 }
 

@@ -36,6 +36,7 @@ import (
 
 	"ultrac/internal/agent"
 	"ultrac/internal/ai"
+	"ultrac/internal/compact"
 	"ultrac/internal/config"
 	"ultrac/internal/logging"
 	"ultrac/internal/prompt"
@@ -58,6 +59,24 @@ type harness struct {
 	tools     []agent.Tool
 	apiKey    string
 	effective map[string]string
+
+	// resolver is kept so the RPC layer can persist settings changes
+	// (set_auto_compaction) through the same read-modify-write cycle the
+	// startup resolution used.
+	resolver *config.FileResolver
+	// compaction is the resolved compaction configuration (settings
+	// section + engine defaults). newAgent hands it to every compactor it
+	// builds.
+	compaction compact.Settings
+	// compactor is the executor of the CURRENT agent/session pair. It is
+	// rebuilt by every newAgent call (new_session / resume_session swap
+	// the pair), so callers re-read it per command instead of caching.
+	compactor *compactor
+	// emitEvent puts agent events on the mode's wire (the RPC and
+	// print-json PiJSONWriter). Nil in text mode: compaction events have
+	// nowhere to go and are dropped, exactly as pi drops them in a mode
+	// with no event stream.
+	emitEvent func(agent.AgentEvent) error
 
 	// streamFn overrides the provider registry. Nil in production; tests
 	// inject a fake so no request leaves the process.
@@ -90,6 +109,15 @@ func buildHarness(f *agentFlags, cwd string, stderr io.Writer, streamFn agent.St
 		fmt.Fprintf(stderr, "warning: %v\n", loadErr)
 	}
 	effective := config.EffectiveEnv(layers)
+
+	// The compaction section resolves the same way: merge the layers, then
+	// inject the engine defaults for absent keys (plan D6). The defaults
+	// never enter a file — Get() reports what the files actually say.
+	merged := config.Settings{}
+	for _, l := range layers {
+		merged = config.MergeSettings(merged, l.Settings)
+	}
+	compaction := resolveCompactionSettings(merged.Compaction, stderr)
 
 	// -- 2. Session ---------------------------------------------------------
 	//
@@ -128,15 +156,17 @@ func buildHarness(f *agentFlags, cwd string, stderr io.Writer, streamFn agent.St
 	tools := tool.All(cwd)
 
 	return &harness{
-		flags:     f,
-		cwd:       cwd,
-		mgr:       mgr,
-		seed:      seed,
-		model:     model,
-		tools:     tools,
-		apiKey:    apiKey,
-		effective: effective,
-		streamFn:  streamFn,
+		flags:      f,
+		cwd:        cwd,
+		mgr:        mgr,
+		seed:       seed,
+		model:      model,
+		tools:      tools,
+		apiKey:     apiKey,
+		effective:  effective,
+		resolver:   r,
+		compaction: compaction,
+		streamFn:   streamFn,
 	}, 0
 }
 
@@ -188,6 +218,13 @@ func (h *harness) recordSessionMeta(mgr *session.SessionManager) {
 // The seed is a parameter rather than h.seed so the caller names which
 // transcript is being replayed: the startup one for --continue, the
 // freshly loaded one for the RPC resume_session command (rpc.go).
+//
+// It also builds the compaction executor for this pair and installs its
+// PrepareRequest hook (docs/compaction-branch-plan.md P-C2): the hook is
+// the auto-compaction trigger, and it must capture the compactor built for
+// THIS agent — after a new_session swap the old one belongs to the
+// abandoned pair. The compactor is published on h.compactor for the RPC
+// layer's manual-compact command.
 func (h *harness) newAgent(mgr *session.SessionManager, seed session.SessionContext, resume bool) *agent.Agent {
 	initial := &agent.AgentInitialState{
 		// Empty on purpose — the prompt lives in the sections patch, not in
@@ -214,12 +251,17 @@ func (h *harness) newAgent(mgr *session.SessionManager, seed session.SessionCont
 			initial.ThinkingLevel = &level
 		}
 	}
-	return agent.NewAgent(agent.AgentOptions{
-		InitialState: initial,
-		GetAPIKey:    func(string) string { return h.apiKey },
-		SessionID:    mgr.SessionID(),
-		StreamFn:     h.streamFn,
+	compactor := newCompactor(mgr, h.compaction, h.apiKey, h.streamFn, h.emitEvent)
+	a := agent.NewAgent(agent.AgentOptions{
+		InitialState:   initial,
+		GetAPIKey:      func(string) string { return h.apiKey },
+		SessionID:      mgr.SessionID(),
+		StreamFn:       h.streamFn,
+		PrepareRequest: compactor.prepareRequest,
 	})
+	compactor.agent = a
+	h.compactor = compactor
+	return a
 }
 
 // promptOptions is the per-prompt prompt build configuration. The tool set

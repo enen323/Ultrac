@@ -154,7 +154,13 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 		for k := range l.Settings.Extra {
 			fmt.Fprintf(stdout, "    (%s section, %d bytes preserved)\n", k, len(l.Settings.Extra[k]))
 		}
-		if len(l.Settings.Env) == 0 && len(l.Settings.Extra) == 0 {
+		// The typed compaction section prints its keys, not a byte count:
+		// the point of `ultrac config` is answering "what does this layer
+		// actually say", and "3 bytes preserved" answers nothing.
+		if l.Settings.Compaction != nil {
+			fmt.Fprintf(stdout, "    (compaction section: %s)\n", formatCompaction(l.Settings.Compaction))
+		}
+		if len(l.Settings.Env) == 0 && len(l.Settings.Extra) == 0 && l.Settings.Compaction == nil {
 			fmt.Fprintln(stdout, "    (empty)")
 		}
 	}
@@ -191,6 +197,26 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "\nwarning: %v\n", loadErr)
 	}
 	return 0
+}
+
+// formatCompaction renders the typed compaction section for `ultrac config`.
+// Absent keys stay absent — the display must not imply a default the file
+// never stated (the engine injects defaults at resolution time, plan D6).
+func formatCompaction(c *config.CompactionSettings) string {
+	var parts []string
+	if c.Enabled != nil {
+		parts = append(parts, fmt.Sprintf("enabled=%t", *c.Enabled))
+	}
+	if c.ReserveTokens != nil {
+		parts = append(parts, fmt.Sprintf("reserveTokens=%d", *c.ReserveTokens))
+	}
+	if c.KeepRecentTokens != nil {
+		parts = append(parts, fmt.Sprintf("keepRecentTokens=%d", *c.KeepRecentTokens))
+	}
+	if len(parts) == 0 {
+		return "(empty object)"
+	}
+	return strings.Join(parts, " ")
 }
 
 // maskIfSecret hides credential values.

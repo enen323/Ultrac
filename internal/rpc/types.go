@@ -28,7 +28,10 @@
 // every command instead of trusting per-struct luck.
 package rpc
 
-import "ultrac/internal/ai"
+import (
+	"ultrac/internal/ai"
+	"ultrac/internal/session"
+)
 
 // ImageContent is one image attachment on a prompt-shaped command.
 //
@@ -44,11 +47,11 @@ type ImageContent struct {
 // RpcCommand is one line of stdin: a discriminant plus the fields the
 // commands in this port use.
 //
-// Fields belonging to commands this port does not implement (compact, bash,
-// fork, switch_session, …) are deliberately absent: an unimplemented
-// command falls through to the unknown-command branch with a clear error
-// rather than being silently accepted and dropped. The set of implemented
-// commands is documented on the dispatch switch in server.go.
+// Fields belonging to commands this port does not implement (bash, fork,
+// switch_session, …) are deliberately absent: an unimplemented command falls
+// through to the unknown-command branch with a clear error rather than being
+// silently accepted and dropped. The set of implemented commands is
+// documented on the dispatch switch in server.go.
 type RpcCommand struct {
 	// ID correlates the command with its response. Optional: a command
 	// without one gets a response without one (pi: rpc-types.ts:20+).
@@ -84,6 +87,15 @@ type RpcCommand struct {
 	// resume_session (Ultrac extension — see the command-set note on the
 	// constants below)
 	SessionPath string `json:"sessionPath,omitempty"`
+
+	// compact
+	CustomInstructions string `json:"customInstructions,omitempty"`
+
+	// set_auto_compaction. A pointer so "absent" is distinguishable from
+	// "false": the command's argument is required (pi's rpc-types.ts types
+	// it as a plain boolean), and answering a malformed command with a
+	// silent "disabled" is how a client's typo becomes a setting.
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 // Command types. The closed set this port implements; anything else is
@@ -118,7 +130,14 @@ const (
 	// compatible: every other command's shape is untouched.
 	CmdListSessions  = "list_sessions"
 	CmdResumeSession = "resume_session"
-	cmdParse         = "parse" // not a command: the parse-error response
+	// CmdCompact and CmdSetAutoCompaction are pi's compaction pair
+	// (rpc-mode.ts:533-540), landed with P-C2 of
+	// docs/compaction-branch-plan.md. The wire shapes are pi's: compact
+	// answers with the CompactionResult the agent-session layer builds
+	// (CompactResult below), set_auto_compaction with nothing.
+	CmdCompact           = "compact"
+	CmdSetAutoCompaction = "set_auto_compaction"
+	cmdParse             = "parse" // not a command: the parse-error response
 )
 
 // Dispositions a prompt-shaped command reports.
@@ -157,8 +176,9 @@ type RpcResponse struct {
 //
 // pi: rpc-types.ts:96-109. Model is optional because a session can exist
 // before a model resolves; in this port a session always has one.
-// isCompacting and autoCompactionEnabled are honest constants here:
-// compaction is a non-goal (plan §2.2), so both are always false.
+// IsCompacting and AutoCompactionEnabled are the live values since P-C2
+// (docs/compaction-branch-plan.md): the host owns both, because compaction
+// runs above the agent.
 type RpcSessionState struct {
 	Model                 *ai.Model `json:"model,omitempty"`
 	ThinkingLevel         string    `json:"thinkingLevel"`
@@ -172,6 +192,25 @@ type RpcSessionState struct {
 	AutoCompactionEnabled bool      `json:"autoCompactionEnabled"`
 	MessageCount          int       `json:"messageCount"`
 	PendingMessageCount   int       `json:"pendingMessageCount"`
+}
+
+// CompactResult is the compact command's response data, and the payload
+// compaction_end's result field carries (pi's CompactionResult as the
+// agent-session layer assembles it — agent-session.ts:2892-2899 for the
+// manual path, :3222-3229 for the automatic one).
+//
+// The low-level compact() in pi's compaction package returns no
+// estimatedTokensAfter; the session layer adds it after appending the entry,
+// which is why it lives here rather than in compact.Result.
+//
+// pi: rpc-types.ts (compact's data) + compaction.ts:104-114.
+type CompactResult struct {
+	Summary              string                    `json:"summary"`
+	FirstKeptEntryID     string                    `json:"firstKeptEntryId"`
+	TokensBefore         int                       `json:"tokensBefore"`
+	EstimatedTokensAfter int                       `json:"estimatedTokensAfter"`
+	Usage                ai.Usage                  `json:"usage"`
+	Details              session.CompactionDetails `json:"details"`
 }
 
 // successResponse builds a success response. data nil omits the field,

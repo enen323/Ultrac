@@ -126,14 +126,23 @@ func (ps *printSession) run() int {
 	ctx, stopWatch, firedSignal := printSignalContext()
 	defer stopWatch()
 
-	// -- 5. Agent -------------------------------------------------------------
-	a := h.newAgent(mgr, h.seed, f.Continue)
-
-	// -- 6. Output surfaces ----------------------------------------------------
+	// -- 5. Output surfaces ----------------------------------------------------
+	//
+	// The writer exists before the agent because the agent's compaction
+	// hook emits through it: compaction events must interleave with the
+	// run's events in wire order (plan D4), so the sink is wired at
+	// construction, not retrofitted after the first request.
 	jsonMode := f.Mode == "json"
 	var writer *transport.PiJSONWriter
 	if jsonMode {
 		writer = transport.NewPiJSONWriter(ps.stdout)
+		h.emitEvent = writer.WriteEvent
+	}
+
+	// -- 6. Agent -------------------------------------------------------------
+	a := h.newAgent(mgr, h.seed, f.Continue)
+
+	if jsonMode {
 		// The header opens the stream, before any event (pi:
 		// print-mode.ts:122-127).
 		hdr := mgr.Header()
