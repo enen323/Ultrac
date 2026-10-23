@@ -20,12 +20,12 @@
 //     turn the tree into branches (P-C3). Branching moves the leaf pointer
 //     only; history is never rewritten, and the next append lands at the end
 //     of the file as a child of the new leaf.
+//   - Path extraction: CreateBranchedSession writes the root→leaf path out
+//     as a new session file (P-C4) — write-only, the live manager stays put
+//     and the caller switches sessions explicitly.
 //
 // # What is deliberately not ported (yet)
 //
-//   - createBranchedSession()/forkFrom(): extracting a root→leaf path into a
-//     new file (label re-chaining included) arrives with the RPC branch
-//     commands in P-C4. Branch/ResetLeaf/BranchWithSummary are ported.
 //   - Labels (type "label"), usage entries, context_edit: read and preserved
 //     through Extra, never written by this version.
 //   - appendCustomEntry/appendCustomMessageEntry: the extension hooks pi
@@ -497,6 +497,83 @@ func setExtra(e *SessionEntry, key string, raw json.RawMessage) {
 		e.Extra = make(map[string]json.RawMessage)
 	}
 	e.Extra[key] = raw
+}
+
+// CreateBranchedSession extracts the root→leaf path into a new session
+// file and returns its path. The live manager is untouched: entries, leaf
+// and file all stay as they were, and the caller switches to the new file
+// the way the RPC host switches sessions (resume_session).
+//
+// pi: createBranchedSession (session-manager.ts:1632-1748). Three
+// deliberate differences, all forced by this port's architecture:
+//
+//   - Write-only, not in-place. pi rebuilds the manager around the path
+//     (new session id, new file, _buildIndex) because its runtime then
+//     rebinds to it. Ultrac's host owns session swaps explicitly
+//     (NewSession / ResumeSession), and an agent mid-conversation cannot
+//     have its transcript rewritten underneath it — so the extraction
+//     writes a file and returns, and switching stays the client's
+//     two-step (clone → resume_session, plan D7's note on
+//     switch_session).
+//   - The file is written immediately, even when the path holds no
+//     conversation. pi defers to the lazy rule there (flushed = false,
+//     _persist creates it later); a clone's whole purpose is the path
+//     handed back, and a file that may never materialise is useless to
+//     the client that asked for it.
+//   - Label entries are preserved verbatim along the path. pi drops them
+//     and re-appends them at the leaf with re-chained parentIds, because
+//     removing a tree entry orphans everything parented to it. The path
+//     is a chain — every entry's parent is the entry before it — so
+//     keeping labels in place leaves no orphan and no re-chain. The
+//     constraint itself stays documented here for the version that
+//     writes labels: if a label is ever dropped from the extracted path,
+//     the entries after it must be re-chained (pathParentId) and a
+//     compaction entry whose firstKeptEntryId named the dropped label
+//     must be remapped, exactly as pi does.
+func (m *SessionManager) CreateBranchedSession(leafID string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.persist || m.sessionFile == "" {
+		return "", fmt.Errorf("session: cannot branch a session with no file behind it")
+	}
+	path := buildPath(m.entries, leafID, m.byID)
+	if len(path) == 0 {
+		return "", fmt.Errorf("session: entry %s not found", leafID)
+	}
+
+	// A new identity: new id, new timestamp, same directory, header linked
+	// to the file this path came from (pi's parentSession).
+	header := NewHeader("", m.cwd, m.sessionFile)
+	newFile := filepath.Join(m.sessionDir, SessionFileName(header.Timestamp, header.ID))
+	if err := os.MkdirAll(filepath.Dir(newFile), 0o755); err != nil {
+		return "", fmt.Errorf("session: create directory for %s: %w", newFile, err)
+	}
+	// O_EXCL: the file name carries a fresh uuidv7, so an existing file
+	// means a collision, and overwriting a transcript is never the answer.
+	f, err := os.OpenFile(newFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return "", fmt.Errorf("session: create %s: %w", newFile, err)
+	}
+	defer f.Close()
+	w := bufio.NewWriter(f)
+	if _, err := w.Write(mustMarshalHeader(header)); err != nil {
+		return "", fmt.Errorf("session: write header %s: %w", newFile, err)
+	}
+	// The path in root→leaf order (buildPath's output), one line each.
+	// Entry ids are preserved verbatim, so a compaction entry's
+	// firstKeptEntryId still names an entry on the path — no remap needed.
+	for _, e := range path {
+		if _, err := w.Write(mustMarshalEntry(e)); err != nil {
+			return "", fmt.Errorf("session: write entry %s: %w", e.ID, err)
+		}
+	}
+	if err := w.Flush(); err != nil {
+		return "", fmt.Errorf("session: flush %s: %w", newFile, err)
+	}
+	if err := f.Sync(); err != nil {
+		return "", fmt.Errorf("session: sync %s: %w", newFile, err)
+	}
+	return newFile, nil
 }
 
 // mustExtraJSON encodes a value whose encoder is total (string, int, string
