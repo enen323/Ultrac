@@ -475,3 +475,95 @@ func TestPiJSONWriterEventsAndObjectsShareOneStream(t *testing.T) {
 		}
 	}
 }
+
+// TestPiJSONWriterCompactionEvents pins the compaction pair's wire shape
+// (plan D4): the same discriminants and field names pi's RPC line carries,
+// with result absent — not null — on failure and errorMessage absent when
+// the compaction was aborted rather than failed.
+func TestPiJSONWriterCompactionEvents(t *testing.T) {
+	result := map[string]any{
+		"summary":              "## Goal\nship it",
+		"firstKeptEntryId":     "entry-42",
+		"tokensBefore":         182340,
+		"estimatedTokensAfter": 24110,
+	}
+	lines := writeEvents(t,
+		agent.EvCompactionStart{Reason: agent.CompactionReasonThreshold},
+		agent.EvCompactionEnd{
+			Reason:    agent.CompactionReasonThreshold,
+			Result:    result,
+			WillRetry: false,
+		},
+		agent.EvCompactionEnd{
+			Reason:       agent.CompactionReasonManual,
+			Aborted:      true,
+			WillRetry:    false,
+			ErrorMessage: "",
+		},
+		agent.EvCompactionEnd{
+			Reason:       agent.CompactionReasonThreshold,
+			WillRetry:    false,
+			ErrorMessage: "Auto-compaction failed: 401 unauthorized",
+		},
+	)
+	if len(lines) != 4 {
+		t.Fatalf("got %d lines, want 4: %v", len(lines), lines)
+	}
+
+	var start struct {
+		Type   string `json:"type"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &start); err != nil {
+		t.Fatalf("line 0 is not JSON: %v (%q)", err, lines[0])
+	}
+	if start.Type != "compaction_start" || start.Reason != "threshold" {
+		t.Errorf("line 0 = %+v, want compaction_start/threshold", start)
+	}
+
+	var ok map[string]any
+	if err := json.Unmarshal([]byte(lines[1]), &ok); err != nil {
+		t.Fatalf("line 1 is not JSON: %v (%q)", err, lines[1])
+	}
+	if ok["type"] != "compaction_end" || ok["reason"] != "threshold" {
+		t.Errorf("line 1 = %v, want compaction_end/threshold", ok)
+	}
+	if ok["aborted"] != false || ok["willRetry"] != false {
+		t.Errorf("line 1 flags = %v/%v, want false/false", ok["aborted"], ok["willRetry"])
+	}
+	res, _ := ok["result"].(map[string]any)
+	if res == nil || res["firstKeptEntryId"] != "entry-42" {
+		t.Errorf("line 1 result = %v, want the compaction result object", ok["result"])
+	}
+	if _, has := ok["errorMessage"]; has {
+		t.Error("a successful compaction_end must not carry errorMessage")
+	}
+
+	var aborted map[string]any
+	if err := json.Unmarshal([]byte(lines[2]), &aborted); err != nil {
+		t.Fatalf("line 2 is not JSON: %v (%q)", err, lines[2])
+	}
+	if aborted["aborted"] != true {
+		t.Errorf("line 2 aborted = %v, want true", aborted["aborted"])
+	}
+	if _, has := aborted["result"]; has {
+		t.Error("an aborted compaction_end must not carry result")
+	}
+	if _, has := aborted["errorMessage"]; has {
+		t.Error("an aborted compaction carries no errorMessage (pi: undefined)")
+	}
+
+	var failed map[string]any
+	if err := json.Unmarshal([]byte(lines[3]), &failed); err != nil {
+		t.Fatalf("line 3 is not JSON: %v (%q)", err, lines[3])
+	}
+	if failed["aborted"] != false {
+		t.Errorf("line 3 aborted = %v, want false", failed["aborted"])
+	}
+	if _, has := failed["result"]; has {
+		t.Error("a failed compaction_end must not carry result")
+	}
+	if got, _ := failed["errorMessage"].(string); got != "Auto-compaction failed: 401 unauthorized" {
+		t.Errorf("line 3 errorMessage = %q, want the prefixed failure", got)
+	}
+}

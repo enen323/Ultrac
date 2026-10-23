@@ -18,6 +18,8 @@
 //	tool_execution_start     toolCallId, toolName, args
 //	tool_execution_update    toolCallId, toolName, args, partialResult
 //	tool_execution_end       toolCallId, toolName, result, isError, durationMs?
+//	compaction_start         reason
+//	compaction_end           reason, result?, aborted, willRetry, errorMessage?
 //
 // In JSON mode pi also writes the session header as the first line, before any
 // event (print-mode.ts:122-127) — WriteHeader does that.
@@ -189,6 +191,34 @@ func (w *PiJSONWriter) writeEventLocked(ev agent.AgentEvent) error {
 		// (pi: agent-loop.ts:926).
 		if e.DurationMS != nil {
 			line["durationMs"] = *e.DurationMS
+		}
+		return w.write(line)
+
+	case agent.EvCompactionStart:
+		// Pass-through, like every non-message_update event in pi's
+		// json-event.ts:48-51. The compaction pair is emitted above the
+		// agent (cmd/ultrac) but rides the same union, so the wire shape
+		// is fixed here (plan D4).
+		return w.write(map[string]any{
+			"type":   "compaction_start",
+			"reason": e.Reason,
+		})
+
+	case agent.EvCompactionEnd:
+		line := map[string]any{
+			"type":      "compaction_end",
+			"reason":    e.Reason,
+			"aborted":   e.Aborted,
+			"willRetry": e.WillRetry,
+		}
+		// result is absent, not null, on failure (pi's
+		// CompactionResult | undefined); errorMessage is absent when the
+		// compaction was aborted rather than failed.
+		if e.Result != nil {
+			line["result"] = e.Result
+		}
+		if e.ErrorMessage != "" {
+			line["errorMessage"] = e.ErrorMessage
 		}
 		return w.write(line)
 
