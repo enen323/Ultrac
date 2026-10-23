@@ -16,12 +16,16 @@
 //   - Compaction-aware context projection (buildContextEntries), so a file pi
 //     compacted rebuilds the same context here — and AppendCompaction, the
 //     writer for the compaction entries that projection reads (P-C1).
+//   - Leaf moves: Branch / ResetLeaf / BranchWithSummary, the writers that
+//     turn the tree into branches (P-C3). Branching moves the leaf pointer
+//     only; history is never rewritten, and the next append lands at the end
+//     of the file as a child of the new leaf.
 //
 // # What is deliberately not ported (yet)
 //
-//   - branch()/resetLeaf()/createBranchedSession()/forkFrom(): the tree
-//     structure exists and is walked, but no API moves the leaf. Deferred with
-//     the rest of the branching UI (plan §2.3).
+//   - createBranchedSession()/forkFrom(): extracting a root→leaf path into a
+//     new file (label re-chaining included) arrives with the RPC branch
+//     commands in P-C4. Branch/ResetLeaf/BranchWithSummary are ported.
 //   - Labels (type "label"), usage entries, context_edit: read and preserved
 //     through Extra, never written by this version.
 //   - appendCustomEntry/appendCustomMessageEntry: the extension hooks pi
@@ -279,6 +283,21 @@ func (m *SessionManager) Entries() []SessionEntry {
 	return out
 }
 
+// TreeEntries returns every entry as a pointer into the live tree, in file
+// order — the view whole-tree walks need (branch collection, getTree), since
+// parent links are followed across the file, not along one path.
+//
+// Same contract as GetBranch: the pointers alias the manager's entries, so
+// callers must treat them as read-only and hold no reference across an
+// append. Entries() is the copying accessor for everyone else.
+func (m *SessionManager) TreeEntries() []*SessionEntry {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*SessionEntry, len(m.entries))
+	copy(out, m.entries)
+	return out
+}
+
 // GetLeafID returns the current leaf entry id, "" before any entry.
 func (m *SessionManager) GetLeafID() string {
 	m.mu.Lock()
@@ -376,6 +395,97 @@ func (m *SessionManager) AppendCompaction(
 			return "", fmt.Errorf("session: encode compaction systemMessage: %w", err)
 		}
 		setExtra(e, "systemMessage", raw)
+	}
+	return e.ID, m.persistLocked(e)
+}
+
+// BranchSummaryDetails is the file-tracking payload a branch_summary entry
+// carries in its details (pi's BranchSummaryDetails,
+// branch-summarization.ts:43-46). A distinct type from CompactionDetails
+// because pi models the two separately, even though the shape is identical
+// today; keeping them apart costs nothing and leaves room to diverge.
+type BranchSummaryDetails struct {
+	ReadFiles     []string `json:"readFiles"`
+	ModifiedFiles []string `json:"modifiedFiles"`
+}
+
+// Branch moves the leaf to an earlier entry. The next append becomes that
+// entry's child, starting a new branch; existing entries are never modified
+// or deleted — the file keeps them and the parent-chain walk ignores them.
+//
+// pi: branch (session-manager.ts:1579-1593). The leaf pointer is the only
+// thing that moves: this is navigation, not a rewrite.
+func (m *SessionManager) Branch(fromID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.byID[fromID]; !ok {
+		return fmt.Errorf("session: entry %s not found", fromID)
+	}
+	m.leafID = fromID
+	return nil
+}
+
+// ResetLeaf moves the leaf before any entry (pi's null leaf). The next append
+// becomes a new root with parentId null — the way back to re-edit the first
+// user message.
+//
+// pi: resetLeaf (session-manager.ts:1591-1594).
+func (m *SessionManager) ResetLeaf() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.leafID = ""
+}
+
+// BranchWithSummary moves the leaf to fromID (nil = before any entry, the
+// resetLeaf position) and appends a branch_summary entry there capturing the
+// path being left. Returns the new entry's id.
+//
+// pi: branchWithSummary (session-manager.ts:1600-1627). Three details carry
+// the semantics:
+//
+//   - fromId records the leaf as it was before this call moved it ("root"
+//     when there was none) — where the abandoned branch was left from, not
+//     where it ends.
+//   - The summary entry's parent is the branch point, and the summary becomes
+//     the new leaf: the next append continues from the checkpoint, so it
+//     leads the new branch's context (the reader frames it as a user
+//     message, pi_context.go).
+//   - details and usage are nil-able the way pi's optional parameters are:
+//     an absent value stays absent on disk rather than becoming a JSON null.
+//
+// fromHook is never written (this version has no summary hooks); the key
+// stays absent, exactly like pi's undefined.
+func (m *SessionManager) BranchWithSummary(
+	fromID *string,
+	summary string,
+	details *BranchSummaryDetails,
+	usage *ai.Usage,
+) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if fromID != nil {
+		if _, ok := m.byID[*fromID]; !ok {
+			return "", fmt.Errorf("session: entry %s not found", *fromID)
+		}
+	}
+	leftFrom := m.leafID
+	if leftFrom == "" {
+		leftFrom = "root"
+	}
+	// Move the leaf before appending, so appendLocked parents the summary at
+	// the branch point (pi assigns this.leafId before building the entry).
+	m.leafID = ""
+	if fromID != nil {
+		m.leafID = *fromID
+	}
+	e := m.appendLocked(TypeBranchSummary)
+	setExtra(e, "fromId", mustExtraJSON(leftFrom))
+	setExtra(e, "summary", mustExtraJSON(summary))
+	if details != nil {
+		setExtra(e, "details", mustExtraJSON(details))
+	}
+	if usage != nil {
+		setExtra(e, "usage", mustExtraJSON(usage))
 	}
 	return e.ID, m.persistLocked(e)
 }
@@ -545,6 +655,12 @@ func (m *SessionManager) BuildSessionContext() SessionContext {
 // the last entry in file order — pi's _buildIndex (session-manager.ts:
 // 1103-1122) does the same, and the file's last line is the tip because
 // entries are only ever appended.
+//
+// Branching does not disturb this: Branch / BranchWithSummary move only the
+// in-memory leaf, and the next append still lands at the end of the file
+// (persistLocked appends, never inserts), so the last line is the tip of the
+// new branch and the abandoned tail stays in the file, off-path. Pinned by
+// TestBranchFileOrderInvariantAfterReopen.
 func (m *SessionManager) reindex() {
 	m.byID = make(map[string]*SessionEntry, len(m.entries))
 	m.leafID = ""
