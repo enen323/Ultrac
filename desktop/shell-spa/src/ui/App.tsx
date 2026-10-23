@@ -12,8 +12,10 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import type { UltracBridge } from "../port/bridge.ts";
 import type { SessionStore } from "../state/session.ts";
 import { contextTokens } from "../state/transcript.ts";
+import type { ForkMessage } from "../state/wire.ts";
 import { dismissBoot } from "./boot.ts";
 import { Composer } from "./Composer.tsx";
+import { ForkPicker } from "./ForkPicker.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { Transcript } from "./Transcript.tsx";
@@ -25,6 +27,14 @@ export function App({ store, bridge }: { store: SessionStore; bridge: UltracBrid
   const [renaming, setRenaming] = useState(false);
   const [draftName, setDraftName] = useState("");
 
+  // The fork selector: view state here, its data from the store (the
+  // kernel answers get_fork_messages). prefill carries a fork's
+  // editorText to the composer, which adopts it once.
+  const [forkOpen, setForkOpen] = useState(false);
+  const [forkList, setForkList] = useState<ForkMessage[]>([]);
+  const [forkLoading, setForkLoading] = useState(false);
+  const [prefill, setPrefill] = useState<string | null>(null);
+
   useEffect(() => {
     if (snap.ready) dismissBoot();
   }, [snap.ready]);
@@ -35,12 +45,29 @@ export function App({ store, bridge }: { store: SessionStore; bridge: UltracBrid
   // The event-derived flag: message_start opens a run, agent_end closes it.
   // get_state's isStreaming lags by up to one poll and is only the backstop.
   const streaming = snap.transcript.streamingKey !== null;
+  const compacting = state?.isCompacting ?? false;
   const error = snap.bootError ?? snap.actionError;
 
   const commitRename = (): void => {
     const name = draftName.trim();
     setRenaming(false);
     if (name && name !== state?.sessionName) void store.renameSession(name);
+  };
+
+  const openForkPicker = async (): Promise<void> => {
+    setForkOpen(true);
+    setForkLoading(true);
+    const messages = await store.forkMessages();
+    setForkList(messages);
+    setForkLoading(false);
+  };
+
+  const pickFork = async (entryId: string): Promise<void> => {
+    const result = await store.fork(entryId);
+    setForkOpen(false);
+    // A user-message target answers with its text: the composer adopts it
+    // for editing (pi's editorText). Other targets move the leaf only.
+    if (result?.editorText) setPrefill(result.editorText);
   };
 
   return (
@@ -99,6 +126,31 @@ export function App({ store, bridge }: { store: SessionStore; bridge: UltracBrid
               <span>{error}</span>
             </div>
           )}
+          {forkOpen && (
+            <ForkPicker
+              messages={forkList}
+              loading={forkLoading}
+              onPick={(entryId) => void pickFork(entryId)}
+              onCancel={() => setForkOpen(false)}
+            />
+          )}
+          <div className="toolrow" role="group" aria-label="会话工具">
+            <button
+              type="button"
+              onClick={() => void store.compact()}
+              disabled={compacting}
+              title="把历史压缩成摘要（compact）——运行中也会先停下再压"
+            >
+              {compacting ? "压缩中…" : "压缩上下文"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void openForkPicker()}
+              title="选一条旧消息，从那里分叉出新的对话线"
+            >
+              从消息分叉
+            </button>
+          </div>
           <Composer
             streaming={streaming}
             pendingCount={state?.pendingMessageCount ?? 0}
@@ -106,8 +158,14 @@ export function App({ store, bridge }: { store: SessionStore; bridge: UltracBrid
             onSend={(text, behavior) => void store.send(text, behavior)}
             onAbort={() => void store.abort()}
             onClearQueue={() => void store.clearQueue()}
+            prefill={prefill}
+            onPrefillConsumed={() => setPrefill(null)}
           />
-          <StatusLine tokens={contextTokens(snap.transcript)} contextWindow={state?.model?.contextWindow} />
+          <StatusLine
+            tokens={contextTokens(snap.transcript)}
+            contextWindow={state?.model?.contextWindow}
+            compacting={compacting}
+          />
         </div>
       </div>
     </div>
@@ -115,12 +173,22 @@ export function App({ store, bridge }: { store: SessionStore; bridge: UltracBrid
 }
 
 /**
- * The context water mark. There is no compaction in this port (plan §4.2),
- * so the page counts what the kernel reports: the last assistant message's
- * input plus cache reads and writes, against the model's context window. An
- * estimate — the label says so — and the only context signal there is.
+ * The context water mark, now with its action attached: the meter counts
+ * what the kernel reports — the last assistant message's input plus cache
+ * reads and writes, against the model's context window — and P-C2 gave
+ * that number something to do with it (the 压缩上下文 button above; a
+ * run in flight shows 压缩中… here while the kernel works). An estimate —
+ * the label says so.
  */
-function StatusLine({ tokens, contextWindow }: { tokens?: number; contextWindow?: number }) {
+function StatusLine({
+  tokens,
+  contextWindow,
+  compacting,
+}: {
+  tokens?: number;
+  contextWindow?: number;
+  compacting?: boolean;
+}) {
   const percent = tokens !== undefined && contextWindow ? Math.min(100, Math.round((tokens / contextWindow) * 100)) : null;
   const tone = percent === null ? "" : percent >= 95 ? "over" : percent >= 75 ? "warn" : "";
   return (
@@ -138,6 +206,7 @@ function StatusLine({ tokens, contextWindow }: { tokens?: number; contextWindow?
       ) : (
         <span>—</span>
       )}
+      {compacting && <span className="compact-flag">压缩中…</span>}
       <span className="spacer" />
     </div>
   );

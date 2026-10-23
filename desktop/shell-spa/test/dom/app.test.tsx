@@ -3,19 +3,23 @@
 // endpoint in a real window, which needs a display and a key; this half
 // needs neither, and it drives the same path — session_loaded, history
 // replay, the typewriter, a tool card, stop, steer/follow-up, model and
-// thinking switches, the session rail, rename, and the error banner.
+// thinking switches, the session rail, rename, the error banner, and the
+// P-C4 dock entries (compact, the compacting flag, the fork picker).
 //
 // The stub is the shell's preload bridge (port/bridge.ts's UltracBridge),
 // not the wire: everything above the bridge is the real page — the real
 // store, the real reducer, the real components.
 
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { cleanup, render, screen, waitFor, act } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "../../src/ui/App.tsx";
 import { SessionStore } from "../../src/state/session.ts";
 import type { CallResult, UltracBridge } from "../../src/port/bridge.ts";
-import type { RpcEvent, RpcSessionState, WireMessage } from "../../src/state/wire.ts";
+import type { CompactResult, ForkMessage, ForkResult, RpcEvent, RpcSessionState, WireMessage } from "../../src/state/wire.ts";
+
+// The page under test drives the P-C4 dock entries too: the compaction
+// button, the fork picker, and the compacting flag on the water mark.
 
 // -- the stub kernel ------------------------------------------------------------
 
@@ -42,6 +46,17 @@ class StubKernel {
     messageCount: 2,
     pendingMessageCount: 0,
   };
+
+  // P-C4 answers. compact swaps the conversation for its summary (the
+  // kernel rewrote the context; get_messages is re-read afterwards), fork
+  // for the abandoned suffix — the same re-read, so both live here.
+  compactAnswer: CompactResult | null = null;
+  /** When set, compact answers with this refusal (the kernel's message). */
+  compactError: string | null = null;
+  forkCandidates: ForkMessage[] = [];
+  forkAnswer: ForkResult = { leafId: null };
+  /** What get_messages answers after a fork (the surviving projection). */
+  forkKeeps: WireMessage[] | null = null;
 
   readonly bridge: UltracBridge = {
     shell: "electron",
@@ -94,6 +109,22 @@ class StubKernel {
         return ok({ disposition: "started" });
       case "resume_session":
         return ok({ cancelled: false });
+      case "compact":
+        if (this.compactError) return { ok: true, command: command.type, success: false, error: this.compactError };
+        // The compaction rewrote the context to the summary; the store's
+        // re-read (get_messages) is what the page ends up showing.
+        this.messages = [msg("assistant", [{ type: "text", text: this.compactAnswer?.summary ?? "【摘要】" }])];
+        return ok(this.compactAnswer ?? { summary: "【摘要】", firstKeptEntryId: "e2", tokensBefore: 0, estimatedTokensAfter: 0, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, details: { readFiles: [], modifiedFiles: [] } });
+      case "get_fork_messages":
+        return ok({ messages: this.forkCandidates });
+      case "fork": {
+        // A fork abandons the suffix after the picked entry; the store's
+        // re-read (get_messages) is what the page ends up showing, so the
+        // test decides what survived via forkKeeps. The answer's
+        // editorText (a user-message target) rides to the composer.
+        if (this.forkKeeps) this.messages = this.forkKeeps;
+        return ok(this.forkAnswer);
+      }
       case "set_model":
         return ok({ ...(this.state.model ?? {}), id: command.modelId, name: command.modelId });
       default:
@@ -291,4 +322,135 @@ test("a failed run shows the error banner", async () => {
 
   expect(await screen.findByText("连接远端失败")).toBeTruthy();
   expect(screen.getByText("出错了")).toBeTruthy();
+});
+
+// -- P-C4: compaction + forking (the dock's two new entries) -----------------
+
+test("compact: the dock button compacts, and the transcript re-reads the summary", async () => {
+  const user = userEvent.setup();
+  kernel.compactAnswer = {
+    summary: "【压缩摘要】我们在讨论 main.go 的结构。",
+    firstKeptEntryId: "e2",
+    tokensBefore: 42000,
+    estimatedTokensAfter: 900,
+    usage: { input: 40000, output: 2000, cacheRead: 0, cacheWrite: 0, totalTokens: 42000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    details: { readFiles: ["main.go"], modifiedFiles: [] },
+  };
+  render(<App store={store} bridge={kernel.bridge} />);
+  await kernel.load();
+
+  await user.click(screen.getByText("压缩上下文"));
+  await waitFor(() => expect(kernel.called("compact")).toBe(true));
+
+  // The kernel rewrote the context to the summary; the page re-read it —
+  // the old exchange is gone, the summary row is what survives.
+  expect(await screen.findByText("【压缩摘要】我们在讨论 main.go 的结构。")).toBeTruthy();
+  expect(screen.queryByText("你好！有什么可以帮你？")).toBeNull();
+});
+
+test("compact refusal: the kernel's idempotence message lands in the banner", async () => {
+  const user = userEvent.setup();
+  kernel.compactError = "Nothing to compact (session too small)";
+  render(<App store={store} bridge={kernel.bridge} />);
+  await kernel.load();
+
+  await user.click(screen.getByText("压缩上下文"));
+  expect(await screen.findByText("Nothing to compact (session too small)")).toBeTruthy();
+  // A refusal leaves the conversation alone.
+  expect(screen.getByText("你好！有什么可以帮你？")).toBeTruthy();
+});
+
+test("while the kernel compacts, both the button and the water mark say so", async () => {
+  kernel.state.isCompacting = true;
+  render(<App store={store} bridge={kernel.bridge} />);
+  await kernel.load();
+
+  // The dock button disables itself and renames; the status line flags.
+  const button = screen.getByRole("button", { name: "压缩中…" });
+  expect((button as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.queryByText("压缩上下文")).toBeNull();
+  expect(within(screen.getByRole("group", { name: "会话工具" })).getByText("压缩中…")).toBeTruthy();
+});
+
+test("fork: the picker lists candidates, picking one prefills the composer and re-reads", async () => {
+  const user = userEvent.setup();
+  kernel.messages = [
+    msg("user", "第一个问题"),
+    msg("assistant", [{ type: "text", text: "第一个回答" }]),
+    msg("user", "第二个问题"),
+    msg("assistant", [{ type: "text", text: "第二个回答" }]),
+  ];
+  kernel.forkCandidates = [
+    { entryId: "e1", text: "第一个问题" },
+    { entryId: "e3", text: "第二个问题" },
+  ];
+  kernel.forkAnswer = { leafId: null, editorText: "第一个问题" };
+  kernel.forkKeeps = [];
+  render(<App store={store} bridge={kernel.bridge} />);
+  await kernel.load();
+  await waitFor(() => expect(screen.getByText("第二个问题")).toBeTruthy());
+
+  await user.click(screen.getByText("从消息分叉"));
+  const dialog = await screen.findByRole("dialog", { name: "选择分叉点" });
+  // The list is the kernel's candidates, in its order.
+  expect(within(dialog).getByText("第一个问题")).toBeTruthy();
+  expect(within(dialog).getByText("第二个问题")).toBeTruthy();
+
+  await user.click(within(dialog).getByText("第一个问题"));
+  await waitFor(() => expect(kernel.callOf("fork").some((command) => command.entryId === "e1")).toBe(true));
+
+  // The panel closes and the picked text is back in the editor, editable.
+  expect(screen.queryByRole("dialog")).toBeNull();
+  await waitFor(() => {
+    const editor = screen.getByPlaceholderText(/说点什么/) as HTMLTextAreaElement;
+    expect(editor.value).toBe("第一个问题");
+  });
+
+  // The abandoned suffix is gone: the fork moved the leaf to the root and
+  // the re-read shows an empty conversation.
+  await waitFor(() => expect(screen.queryByText("第一个回答")).toBeNull());
+  expect(screen.queryByText("第二个问题")).toBeNull();
+});
+
+test("fork: a non-user target moves the leaf without touching the composer", async () => {
+  const user = userEvent.setup();
+  kernel.messages = [
+    msg("user", "第一个问题"),
+    msg("assistant", [{ type: "text", text: "第一个回答" }]),
+    msg("user", "第二个问题"),
+  ];
+  kernel.forkCandidates = [{ entryId: "e1", text: "第一个问题" }];
+  // Forking the assistant's entry keeps the first exchange as the context.
+  kernel.forkAnswer = { leafId: "e2" };
+  kernel.forkKeeps = kernel.messages.slice(0, 2);
+  render(<App store={store} bridge={kernel.bridge} />);
+  await kernel.load();
+  await waitFor(() => expect(screen.getByText("第二个问题")).toBeTruthy());
+
+  await user.click(screen.getByText("从消息分叉"));
+  const dialog = await screen.findByRole("dialog", { name: "选择分叉点" });
+  await user.click(within(dialog).getByText("第一个问题"));
+  await waitFor(() => expect(kernel.callOf("fork").some((command) => command.entryId === "e1")).toBe(true));
+
+  // No editorText: the composer keeps whatever it had (empty here).
+  const editor = screen.getByPlaceholderText(/说点什么/) as HTMLTextAreaElement;
+  expect(editor.value).toBe("");
+  // The surviving prefix stays on screen; the forked-away tail does not.
+  expect(screen.getByText("第一个回答")).toBeTruthy();
+  await waitFor(() => expect(screen.queryByText("第二个问题")).toBeNull());
+});
+
+test("fork: a session with nothing to fork says so, and cancel closes the picker", async () => {
+  const user = userEvent.setup();
+  kernel.forkCandidates = [];
+  render(<App store={store} bridge={kernel.bridge} />);
+  await kernel.load();
+
+  await user.click(screen.getByText("从消息分叉"));
+  const dialog = await screen.findByRole("dialog", { name: "选择分叉点" });
+  expect(within(dialog).getByText("这个会话还没有可以分叉的消息。")).toBeTruthy();
+
+  await user.click(within(dialog).getByText("取消"));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(kernel.called("fork")).toBe(false);
 });

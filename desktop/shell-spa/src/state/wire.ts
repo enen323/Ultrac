@@ -36,6 +36,12 @@ export interface RpcCommand {
 
   // resume_session
   sessionPath?: string;
+
+  // compact
+  customInstructions?: string;
+
+  // fork / clone
+  entryId?: string;
 }
 
 /** One image attachment on a prompt-shaped command (base64 payload). */
@@ -108,6 +114,44 @@ export interface SessionSummary {
   messageCount: number;
   name?: string;
   cwd?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Compaction and the branch tree (P-C2 / P-C4)
+// ---------------------------------------------------------------------------
+
+/**
+ * CompactResult — internal/rpc/types.go (compact's response data).
+ * tokensBefore is what the conversation cost; estimatedTokensAfter is the
+ * projection's estimate the session layer adds (pi's compaction.ts:104-114).
+ */
+export interface CompactResult {
+  summary: string;
+  firstKeptEntryId: string;
+  tokensBefore: number;
+  estimatedTokensAfter: number;
+  usage: Usage;
+  details: { readFiles: string[]; modifiedFiles: string[] };
+}
+
+/**
+ * ForkMessage — internal/session/pi_tree.go (get_fork_messages' entries):
+ * one candidate in the fork selector, a user message with text.
+ */
+export interface ForkMessage {
+  entryId: string;
+  text: string;
+}
+
+/**
+ * ForkResult — internal/rpc/server.go's cmdFork data. leafId is null in
+ * the before-any-entry position (pi's string | null); editorText is
+ * absent unless the target was a user message, whose text the client
+ * puts back in the composer.
+ */
+export interface ForkResult {
+  leafId: string | null;
+  editorText?: string;
 }
 
 // ---------------------------------------------------------------------------

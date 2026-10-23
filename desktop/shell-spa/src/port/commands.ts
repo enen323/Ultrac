@@ -5,7 +5,9 @@
 // typo here surfaces as a rejected call rather than a hang.
 //
 // The set is closed on purpose (plan D3): the page implements the 18-command
-// face of docs/desktop-shell-plan.md §4.2 and nothing else.
+// face of docs/desktop-shell-plan.md §4.2 plus the P-C4 branch quartet's
+// user-facing half (compact, fork, get_fork_messages — get_tree and clone
+// stay kernel-side: the tree navigator and the extraction have no page yet).
 
 export const CmdPrompt = "prompt";
 export const CmdSteer = "steer";
@@ -27,3 +29,6 @@ export const CmdGetEntries = "get_entries";
 export const CmdGetCommands = "get_commands";
 export const CmdListSessions = "list_sessions";
 export const CmdResumeSession = "resume_session";
+export const CmdCompact = "compact";
+export const CmdFork = "fork";
+export const CmdGetForkMessages = "get_fork_messages";

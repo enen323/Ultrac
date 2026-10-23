@@ -507,6 +507,105 @@ textarea {
   opacity: 1;
 }
 
+/* ---------------------------------------------------------------------------
+   Session tools + fork picker (P-C4): two quiet dock entries. The composer's
+   send/stop own the dock's only loud colours — compaction and forking are
+   secondary actions on the conversation, so they sit as outlined pills.
+   --------------------------------------------------------------------------- */
+
+.toolrow {
+  display: flex;
+  gap: 8px;
+  margin: 0 auto 8px;
+  max-width: var(--column);
+  width: 100%;
+}
+
+.toolrow button {
+  padding: 3px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--raised);
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  transition: border-color var(--m-line), color var(--m-line), opacity var(--m-line);
+}
+
+.toolrow button:hover:not(:disabled) {
+  border-color: var(--net);
+  color: var(--net);
+}
+
+.toolrow button:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
+.fork-picker {
+  margin: 0 auto 8px;
+  max-width: var(--column);
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--raised);
+  font-size: var(--fs-meta);
+}
+
+.fork-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+}
+
+.fork-head > span {
+  flex: 1;
+}
+
+.fork-cancel {
+  flex: none;
+  color: var(--faint);
+  font-size: var(--fs-micro);
+}
+
+.fork-cancel:hover {
+  color: var(--text);
+}
+
+.fork-empty {
+  margin: 8px 0 2px;
+  color: var(--faint);
+  font-size: var(--fs-micro);
+}
+
+.fork-list {
+  margin: 8px 0 2px;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fork-list button {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  border-radius: var(--r-sm);
+  text-align: left;
+  color: var(--text);
+  font-size: var(--fs-meta);
+  line-height: 1.45;
+}
+
+.fork-list button:hover {
+  background: var(--net-wash);
+  color: var(--net);
+}
+
 .composer-box {
   display: flex;
   align-items: flex-end;
@@ -646,6 +745,12 @@ textarea {
 
 .status .meter.over > i {
   background: var(--err);
+}
+
+/* The kernel is compacting mid-run: the meter's companion flag, so the
+   water mark and the reason it may be stale share one line. */
+.status .compact-flag {
+  color: var(--warn);
 }
 
 /* ---------------------------------------------------------------------------

@@ -15,6 +15,12 @@
 // Enter sends, Shift+Enter makes a newline, and a composition in flight —
 // the Chinese IME case — owns Enter until it commits (isComposing is the
 // only honest signal; keydown alone cannot see it).
+//
+// prefill is how a fork lands its picked message back in the editor: the
+// kernel answers a user-message fork with the message's text (pi's
+// editorText), the page hands it here, and the composer adopts it once.
+// The applied-ref guard makes a re-render with the same prefill a no-op,
+// so the parent may pass a fresh closure every render.
 
 import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 import type { SendBehavior } from "../state/session.ts";
@@ -26,14 +32,28 @@ interface Props {
   onSend: (text: string, behavior?: SendBehavior) => void;
   onAbort: () => void;
   onClearQueue: () => void;
+  /** Text to adopt into the editor (a fork's editorText), once per value. */
+  prefill?: string | null;
+  /** Called after the prefill was adopted, so the parent can clear it. */
+  onPrefillConsumed?: () => void;
 }
 
 const MAX_HEIGHT = 180;
 
-export function Composer({ streaming, pendingCount, disabled, onSend, onAbort, onClearQueue }: Props) {
+export function Composer({
+  streaming,
+  pendingCount,
+  disabled,
+  onSend,
+  onAbort,
+  onClearQueue,
+  prefill,
+  onPrefillConsumed,
+}: Props) {
   const [text, setText] = useState("");
   const [behavior, setBehavior] = useState<SendBehavior>("steer");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const appliedPrefill = useRef<string | null>(null);
 
   // Grow with the text, up to a cap; past it the textarea scrolls.
   useEffect(() => {
@@ -42,6 +62,15 @@ export function Composer({ streaming, pendingCount, disabled, onSend, onAbort, o
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, MAX_HEIGHT)}px`;
   }, [text]);
+
+  // Adopt a fork's text exactly once per value.
+  useEffect(() => {
+    if (!prefill || appliedPrefill.current === prefill) return;
+    appliedPrefill.current = prefill;
+    setText(prefill);
+    textareaRef.current?.focus();
+    onPrefillConsumed?.();
+  }, [prefill, onPrefillConsumed]);
 
   const submit = (): void => {
     const value = text.trim();

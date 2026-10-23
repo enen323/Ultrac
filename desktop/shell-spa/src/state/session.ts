@@ -30,8 +30,11 @@
 import {
   CmdAbort,
   CmdClearQueue,
+  CmdCompact,
+  CmdFork,
   CmdGetAvailableModels,
   CmdGetAvailableThinking,
+  CmdGetForkMessages,
   CmdGetMessages,
   CmdGetState,
   CmdListSessions,
@@ -49,7 +52,16 @@ import {
   fromMessages,
   type TranscriptState,
 } from "./transcript.ts";
-import type { RpcEvent, RpcModel, RpcSessionState, SessionSummary, WireMessage } from "./wire.ts";
+import type {
+  CompactResult,
+  ForkMessage,
+  ForkResult,
+  RpcEvent,
+  RpcModel,
+  RpcSessionState,
+  SessionSummary,
+  WireMessage,
+} from "./wire.ts";
 
 const POLL_MS = 2000;
 
@@ -216,8 +228,7 @@ export class SessionStore {
 
   async resumeSession(sessionPath: string): Promise<void> {
     await this.#act(() => callVoid(this.#bridge, { type: CmdResumeSession, sessionPath }));
-    const messages = await callData<{ messages: WireMessage[] }>(this.#bridge, { type: CmdGetMessages });
-    this.#patch({ transcript: fromMessages(messages.messages ?? []) });
+    await this.#reloadTranscript();
     await this.#refreshState();
   }
 
@@ -242,6 +253,56 @@ export class SessionStore {
     await this.#refreshState();
   }
 
+  /**
+   * Compact the conversation now (P-C2's manual path). The kernel aborts
+   * any active run first, so this is safe to call mid-stream. The
+   * transcript was rewritten by the compaction — a checkpoint summary
+   * replaces the old prefix — so it is re-read exactly like a resume.
+   * Returns the result, or null when the call failed (the error banner
+   * carries the kernel's message, including the idempotence refusals
+   * "Already compacted" / "Nothing to compact (session too small)").
+   */
+  async compact(): Promise<CompactResult | null> {
+    return this.#act(async () => {
+      const result = await callData<CompactResult>(this.#bridge, { type: CmdCompact });
+      await this.#reloadTranscript();
+      await this.#refreshState();
+      return result;
+    });
+  }
+
+  /**
+   * The fork selector's candidates: every user message with text, in file
+   * order (get_fork_messages). An empty list is a session with nothing to
+   * fork from — the caller renders that, it is not an error.
+   */
+  async forkMessages(): Promise<ForkMessage[]> {
+    const messages = await this.#act(async () => {
+      const data = await callData<{ messages: ForkMessage[] }>(this.#bridge, { type: CmdGetForkMessages });
+      return data.messages ?? [];
+    });
+    return messages ?? [];
+  }
+
+  /**
+   * Fork from one entry (plan D7: the leaf moves, the agent is re-seeded
+   * from the fork point — the kernel's ReplaceMessages). The transcript
+   * the page shows must be re-read for the same reason a resume re-reads
+   * it: the abandoned history is gone from the live context.
+   *
+   * Returns the kernel's answer, whose editorText (a user-message target)
+   * is what the composer puts back for editing. null when the call
+   * failed.
+   */
+  async fork(entryId: string): Promise<ForkResult | null> {
+    return this.#act(async () => {
+      const result = await callData<ForkResult>(this.#bridge, { type: CmdFork, entryId });
+      await this.#reloadTranscript();
+      await this.#refreshState();
+      return result;
+    });
+  }
+
   async refreshSessions(): Promise<void> {
     try {
       const data = await callData<{ sessions: SessionSummary[] }>(this.#bridge, { type: CmdListSessions });
@@ -254,11 +315,31 @@ export class SessionStore {
 
   // -- internals ------------------------------------------------------------
 
-  /** Run one action, recording its failure for the error banner. */
-  async #act(run: () => Promise<void>): Promise<void> {
+  /**
+   * Run one action, recording its failure for the error banner, and
+   * handing back whatever it produced (null on failure). The commands
+   * whose data the page acts on — compact, fork — return it; the rest
+   * ignore it.
+   */
+  async #act<T>(run: () => Promise<T>): Promise<T | null> {
     this.#patch({ actionError: null });
     try {
-      await run();
+      return await run();
+    } catch (err) {
+      this.#patch({ actionError: messageOf(err) });
+      return null;
+    }
+  }
+
+  /**
+   * Re-read the live conversation into the transcript. After a session
+   * swap, a compaction or a fork the kernel's context is not what the
+   * page last saw, and get_messages is the only authority for it.
+   */
+  async #reloadTranscript(): Promise<void> {
+    try {
+      const messages = await callData<{ messages: WireMessage[] }>(this.#bridge, { type: CmdGetMessages });
+      this.#patch({ transcript: fromMessages(messages.messages ?? []) });
     } catch (err) {
       this.#patch({ actionError: messageOf(err) });
     }
