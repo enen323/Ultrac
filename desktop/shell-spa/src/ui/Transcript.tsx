@@ -57,6 +57,30 @@ function Row({
   transcript: TranscriptState;
   bridge: UltracBridge;
 }) {
+  // A boundary the session file records as an entry rather than a turn: a
+  // compaction cut or the summary of a branch this conversation came back
+  // from. It is a divider, never a bubble — the summary is the model's
+  // words, and the turns it replaced are still above it.
+  if (row.role === "notice") {
+    return (
+      <div className="row notice">
+        <details className="notice-card">
+          <summary>
+            <span className="notice-title">{row.notice === "branch" ? "分支摘要" : "上下文已压缩"}</span>
+            {row.tokensBefore !== undefined ? (
+              <span className="notice-meta">压缩前约 {row.tokensBefore.toLocaleString()} tokens</span>
+            ) : null}
+          </summary>
+          <div className="notice-body">
+            {row.blocks.map((block, index) => (
+              <BlockFragment key={index} block={block} bridge={bridge} />
+            ))}
+          </div>
+        </details>
+      </div>
+    );
+  }
+
   // A run that failed lands as an assistant message carrying errorMessage
   // (internal/agent handleRunFailure). It is the run态错误呈现 the plan
   // asks for: the row itself says what went wrong.

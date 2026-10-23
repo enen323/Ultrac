@@ -13,7 +13,7 @@
 // the shell's buffer and is flushed first. So:
 //
 //   1. events before session_loaded  → queued, not applied
-//   2. session_loaded                → get_messages + catalogs in parallel
+//   2. session_loaded                → get_entries + catalogs in parallel
 //   3. snapshot lands                → transcript = snapshot, then the queue
 //                                     drains through the reducer in replay
 //                                     mode (transcript.ts explains the dedup)
@@ -34,6 +34,7 @@ import {
   CmdFork,
   CmdGetAvailableModels,
   CmdGetAvailableThinking,
+  CmdGetEntries,
   CmdGetForkMessages,
   CmdGetMessages,
   CmdGetState,
@@ -46,9 +47,11 @@ import {
   CmdSetThinkingLevel,
 } from "../port/commands.ts";
 import { callData, callVoid, type UltracBridge } from "../port/bridge.ts";
+import { historyRows } from "./history.ts";
 import {
   applyEvent,
   emptyTranscript,
+  fromHistory,
   fromMessages,
   type TranscriptState,
 } from "./transcript.ts";
@@ -56,6 +59,7 @@ import type {
   CompactResult,
   ForkMessage,
   ForkResult,
+  GetEntriesData,
   RpcEvent,
   RpcModel,
   RpcSessionState,
@@ -159,11 +163,8 @@ export class SessionStore {
     let levels = this.#snapshot.thinkingLevels;
     let bootError: string | null = null;
     try {
-      const [messages, fetchedModels, fetchedLevels] = await Promise.all([
-        callData<{ messages: WireMessage[] }>(this.#bridge, { type: CmdGetMessages }).then(
-          (data) => data.messages ?? [],
-          () => [] as WireMessage[],
-        ),
+      const [history, fetchedModels, fetchedLevels] = await Promise.all([
+        this.#readTranscript(),
         callData<{ models: RpcModel[] }>(this.#bridge, { type: CmdGetAvailableModels }).then(
           (data) => data.models ?? [],
           () => [] as RpcModel[],
@@ -173,7 +174,7 @@ export class SessionStore {
           () => [] as string[],
         ),
       ]);
-      transcript = fromMessages(messages);
+      transcript = history;
       models = fetchedModels;
       levels = fetchedLevels;
     } catch (err) {
@@ -256,8 +257,10 @@ export class SessionStore {
   /**
    * Compact the conversation now (P-C2's manual path). The kernel aborts
    * any active run first, so this is safe to call mid-stream. The
-   * transcript was rewritten by the compaction — a checkpoint summary
-   * replaces the old prefix — so it is re-read exactly like a resume.
+   * transcript is re-read from the session file afterwards: the file gained
+   * a compaction entry at the cut, which the page renders as a boundary
+   * marker while keeping every turn before it (the model's context lost
+   * those turns — the page must not).
    * Returns the result, or null when the call failed (the error banner
    * carries the kernel's message, including the idempotence refusals
    * "Already compacted" / "Nothing to compact (session too small)").
@@ -288,7 +291,9 @@ export class SessionStore {
    * Fork from one entry (plan D7: the leaf moves, the agent is re-seeded
    * from the fork point — the kernel's ReplaceMessages). The transcript
    * the page shows must be re-read for the same reason a resume re-reads
-   * it: the abandoned history is gone from the live context.
+   * it: the leaf moved, so the branch the file now describes is a shorter
+   * one — its walk from the new leaf simply stops before the abandoned
+   * suffix.
    *
    * Returns the kernel's answer, whose editorText (a user-message target)
    * is what the composer puts back for editing. null when the call
@@ -333,15 +338,37 @@ export class SessionStore {
 
   /**
    * Re-read the live conversation into the transcript. After a session
-   * swap, a compaction or a fork the kernel's context is not what the
-   * page last saw, and get_messages is the only authority for it.
+   * swap, a compaction or a fork the leaf the file points at is not where
+   * the page last was, and the session file is the only authority for what
+   * the conversation contains.
    */
   async #reloadTranscript(): Promise<void> {
     try {
-      const messages = await callData<{ messages: WireMessage[] }>(this.#bridge, { type: CmdGetMessages });
-      this.#patch({ transcript: fromMessages(messages.messages ?? []) });
+      this.#patch({ transcript: await this.#readTranscript() });
     } catch (err) {
       this.#patch({ actionError: messageOf(err) });
+    }
+  }
+
+  /**
+   * The transcript the session file describes: every message on the current
+   * branch, with compaction and branch summaries as notice rows.
+   *
+   * Deliberately not get_messages. That command answers with the model's
+   * request, and a compaction rewrites it: the summary takes a user
+   * message's place and the summarized turns are gone, so a page built on
+   * it shows the summary in the user's bubble and cannot show the earlier
+   * conversation at all (state/history.ts tells the whole story).
+   * get_messages stays as the fallback for a kernel that cannot serve
+   * get_entries — a degraded history beats no page.
+   */
+  async #readTranscript(): Promise<TranscriptState> {
+    try {
+      const data = await callData<GetEntriesData>(this.#bridge, { type: CmdGetEntries });
+      return fromHistory(historyRows(data.entries ?? [], data.leafId ?? null));
+    } catch {
+      const data = await callData<{ messages: WireMessage[] }>(this.#bridge, { type: CmdGetMessages });
+      return fromMessages(data.messages ?? []);
     }
   }
 

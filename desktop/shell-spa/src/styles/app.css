@@ -335,6 +335,67 @@ textarea {
   color: var(--err);
 }
 
+/* Notice rows: a compaction cut or a branch summary. A divider in the
+   conversation, not a turn — the turns on either side stay visible. */
+.row.notice {
+  margin: 2px 0;
+}
+
+.notice-card {
+  border: 1px dashed var(--border);
+  border-radius: var(--r-md);
+  background: var(--sunk);
+  font-size: var(--fs-meta);
+  color: var(--muted);
+}
+
+.notice-card > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 11px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.notice-card > summary::-webkit-details-marker {
+  display: none;
+}
+
+.notice-card > summary::before {
+  content: "▸";
+  color: var(--faint);
+  font-size: var(--fs-micro);
+}
+
+.notice-card[open] > summary::before {
+  content: "▾";
+}
+
+.notice-title {
+  font-weight: var(--w-med);
+  color: var(--muted);
+  letter-spacing: .02em;
+}
+
+.notice-meta {
+  color: var(--faint);
+  font-size: var(--fs-micro);
+}
+
+.notice-body {
+  padding: 0 13px 10px 26px;
+  border-top: 1px solid var(--hair);
+  margin-top: 2px;
+  padding-top: 8px;
+}
+
+.notice-body .md {
+  font-size: var(--fs-meta);
+  line-height: 1.65;
+}
+
 /* ---------------------------------------------------------------------------
    Thinking and tool cards
    --------------------------------------------------------------------------- */

@@ -16,7 +16,7 @@ import userEvent from "@testing-library/user-event";
 import { App } from "../../src/ui/App.tsx";
 import { SessionStore } from "../../src/state/session.ts";
 import type { CallResult, UltracBridge } from "../../src/port/bridge.ts";
-import type { CompactResult, ForkMessage, ForkResult, RpcEvent, RpcSessionState, WireMessage } from "../../src/state/wire.ts";
+import type { CompactResult, ForkMessage, ForkResult, RpcEvent, RpcSessionState, WireEntry, WireMessage } from "../../src/state/wire.ts";
 
 // The page under test drives the P-C4 dock entries too: the compaction
 // button, the fork picker, and the compacting flag on the water mark.
@@ -47,16 +47,23 @@ class StubKernel {
     pendingMessageCount: 0,
   };
 
-  // P-C4 answers. compact swaps the conversation for its summary (the
-  // kernel rewrote the context; get_messages is re-read afterwards), fork
-  // for the abandoned suffix — the same re-read, so both live here.
+  // P-C4 answers. compact appends a compaction entry at the cut — the
+  // messages it summarized stay in the file, which is what the page now
+  // renders (get_entries, not get_messages). fork moves the leaf; the
+  // abandoned suffix stays in the file and the walk from the new leaf
+  // simply never reaches it.
   compactAnswer: CompactResult | null = null;
   /** When set, compact answers with this refusal (the kernel's message). */
   compactError: string | null = null;
   forkCandidates: ForkMessage[] = [];
   forkAnswer: ForkResult = { leafId: null };
-  /** What get_messages answers after a fork (the surviving projection). */
-  forkKeeps: WireMessage[] | null = null;
+  /**
+   * The session file's entries. Left null, they are derived from
+   * `messages` — the shape a run writes (one entry per message).
+   */
+  entries: WireEntry[] | null = null;
+  /** The file's leaf; null means the last entry. */
+  leafId: string | null = null;
 
   readonly bridge: UltracBridge = {
     shell: "electron",
@@ -81,6 +88,24 @@ class StubKernel {
     };
   }
 
+  /** The session file's lines: explicit when a test set them, else one entry per message. */
+  entryLines(): WireEntry[] {
+    if (this.entries) return this.entries;
+    let parentId: string | null = null;
+    return this.messages.map((message, index) => {
+      const id = `e${index + 1}`;
+      const entry: WireEntry = {
+        type: "message",
+        id,
+        parentId,
+        timestamp: new Date(message.timestamp).toISOString(),
+        message,
+      };
+      parentId = id;
+      return entry;
+    });
+  }
+
   async #call(command: Record<string, unknown> & { type: string }): Promise<CallResult> {
     this.calls.push(command);
     const ok = (data: unknown): CallResult => ({ ok: true, command: command.type, success: true, data });
@@ -89,6 +114,11 @@ class StubKernel {
         return ok(this.state);
       case "get_messages":
         return ok({ messages: this.messages });
+      case "get_entries": {
+        const entries = this.entryLines();
+        const leafId = this.leafId ?? entries.at(-1)?.id ?? null;
+        return ok({ entries, leafId });
+      }
       case "get_available_models":
         return ok({
           models: [
@@ -109,20 +139,42 @@ class StubKernel {
         return ok({ disposition: "started" });
       case "resume_session":
         return ok({ cancelled: false });
-      case "compact":
+      case "compact": {
         if (this.compactError) return { ok: true, command: command.type, success: false, error: this.compactError };
-        // The compaction rewrote the context to the summary; the store's
-        // re-read (get_messages) is what the page ends up showing.
-        this.messages = [msg("assistant", [{ type: "text", text: this.compactAnswer?.summary ?? "【摘要】" }])];
-        return ok(this.compactAnswer ?? { summary: "【摘要】", firstKeptEntryId: "e2", tokensBefore: 0, estimatedTokensAfter: 0, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, details: { readFiles: [], modifiedFiles: [] } });
+        const answer: CompactResult = this.compactAnswer ?? {
+          summary: "【摘要】",
+          firstKeptEntryId: "e2",
+          tokensBefore: 0,
+          estimatedTokensAfter: 0,
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          details: { readFiles: [], modifiedFiles: [] },
+        };
+        // The kernel appends a compaction entry and leaves the summarized
+        // messages in the file (agent.AppendCompaction). The model context
+        // shrinks; the session file does not.
+        const entries = this.entryLines();
+        this.entries = [
+          ...entries,
+          {
+            type: "compaction",
+            id: `e${entries.length + 1}`,
+            parentId: entries.at(-1)?.id ?? null,
+            timestamp: new Date(stamp += 1000).toISOString(),
+            summary: answer.summary,
+            firstKeptEntryId: answer.firstKeptEntryId,
+            tokensBefore: answer.tokensBefore,
+          },
+        ];
+        return ok(answer);
+      }
       case "get_fork_messages":
         return ok({ messages: this.forkCandidates });
       case "fork": {
-        // A fork abandons the suffix after the picked entry; the store's
-        // re-read (get_messages) is what the page ends up showing, so the
-        // test decides what survived via forkKeeps. The answer's
-        // editorText (a user-message target) rides to the composer.
-        if (this.forkKeeps) this.messages = this.forkKeeps;
+        // The kernel moves the leaf to the fork point; the file keeps the
+        // abandoned suffix, and the next get_entries walk starts from the
+        // leaf (that is the whole reason the page re-reads).
+        if (this.forkAnswer.leafId !== null) this.leafId = this.forkAnswer.leafId;
+        else this.leafId = "";
         return ok(this.forkAnswer);
       }
       case "set_model":
@@ -326,7 +378,7 @@ test("a failed run shows the error banner", async () => {
 
 // -- P-C4: compaction + forking (the dock's two new entries) -----------------
 
-test("compact: the dock button compacts, and the transcript re-reads the summary", async () => {
+test("compact: the cut becomes a notice and the summarized turns stay on screen", async () => {
   const user = userEvent.setup();
   kernel.compactAnswer = {
     summary: "【压缩摘要】我们在讨论 main.go 的结构。",
@@ -342,10 +394,19 @@ test("compact: the dock button compacts, and the transcript re-reads the summary
   await user.click(screen.getByText("压缩上下文"));
   await waitFor(() => expect(kernel.called("compact")).toBe(true));
 
-  // The kernel rewrote the context to the summary; the page re-read it —
-  // the old exchange is gone, the summary row is what survives.
-  expect(await screen.findByText("【压缩摘要】我们在讨论 main.go 的结构。")).toBeTruthy();
-  expect(screen.queryByText("你好！有什么可以帮你？")).toBeNull();
+  // The page re-read the session file, not the model's context: the turns
+  // the summary replaced are still where they were …
+  expect(await screen.findByText("你好")).toBeTruthy();
+  expect(screen.getByText("你好！有什么可以帮你？")).toBeTruthy();
+
+  // … the cut is a notice with the summary inside it …
+  expect(await screen.findByText("上下文已压缩")).toBeTruthy();
+  expect(screen.getByText(/压缩前约 42,000 tokens/)).toBeTruthy();
+  const summary = screen.getByText("【压缩摘要】我们在讨论 main.go 的结构。");
+  // … and it is never dressed as something the user typed (the bug: the
+  // summary arrived framed as a user message and took the user's bubble).
+  expect(summary.closest(".row.user")).toBeNull();
+  expect(summary.closest(".row.notice")).toBeTruthy();
 });
 
 test("compact refusal: the kernel's idempotence message lands in the banner", async () => {
@@ -385,7 +446,6 @@ test("fork: the picker lists candidates, picking one prefills the composer and r
     { entryId: "e3", text: "第二个问题" },
   ];
   kernel.forkAnswer = { leafId: null, editorText: "第一个问题" };
-  kernel.forkKeeps = [];
   render(<App store={store} bridge={kernel.bridge} />);
   await kernel.load();
   await waitFor(() => expect(screen.getByText("第二个问题")).toBeTruthy());
@@ -422,7 +482,6 @@ test("fork: a non-user target moves the leaf without touching the composer", asy
   kernel.forkCandidates = [{ entryId: "e1", text: "第一个问题" }];
   // Forking the assistant's entry keeps the first exchange as the context.
   kernel.forkAnswer = { leafId: "e2" };
-  kernel.forkKeeps = kernel.messages.slice(0, 2);
   render(<App store={store} bridge={kernel.bridge} />);
   await kernel.load();
   await waitFor(() => expect(screen.getByText("第二个问题")).toBeTruthy());
