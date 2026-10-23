@@ -10,6 +10,7 @@ import {
   applyEvent,
   contextTokens,
   emptyTranscript,
+  fromHistory,
   fromMessages,
 } from "../src/state/transcript.ts";
 import type { RpcEvent, WireMessage } from "../src/state/wire.ts";
@@ -244,6 +245,26 @@ test("fromMessages: system rows drop, user strings normalize, tool results route
   assert.equal(state.toolRuns["c1"]!.text, "a.go");
   assert.equal(state.toolRuns["c1"]!.hasResult, true);
   assert.equal(contextTokens(state), 1000, "input + cacheRead of the last assistant message");
+});
+
+test("contextTokens stops at the newest compaction: a pre-cut usage describes a gone request", () => {
+  // Two turns measured at 42k, then the cut, then one turn measured at 900:
+  // the water mark is the post-cut number, not the one the user compacted away.
+  const state = fromMessages([
+    message("user", "第一问"),
+    message("assistant", [{ type: "text", text: "第一答" }], { usage: usage(40000) }),
+    message("user", "第二问"),
+    message("assistant", [{ type: "text", text: "第二答" }], { usage: usage(900) }),
+  ]);
+  assert.equal(contextTokens(state), 1800);
+
+  const cut = fromHistory([
+    { kind: "message", message: message("user", "第一问") },
+    { kind: "message", message: message("assistant", [{ type: "text", text: "第一答" }], { usage: usage(40000) }) },
+    { kind: "compaction", entryId: "e3", timestamp: nextStamp(), summary: "摘要", tokensBefore: 42000 },
+  ]);
+  // Nothing after the cut: no honest number, rather than the old one.
+  assert.equal(contextTokens(cut), undefined);
 });
 
 // -- replay: buffered events meeting the snapshot -------------------------------

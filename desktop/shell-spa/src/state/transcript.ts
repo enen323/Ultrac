@@ -24,13 +24,20 @@
 //
 // The shell buffers kernel events until the page has loaded, then flushes
 // them and sends session_loaded (main.ts did-finish-load). So a page that
-// loads mid-run receives the run's early events BEFORE the get_messages
-// snapshot that already contains the completed messages among them.
+// loads mid-run receives the run's early events BEFORE the history snapshot
+// that already contains the completed messages among them.
 // Replaying those events naively would duplicate rows. applyEvent's replay
 // flag is the dedup: an event is skipped when its message is already in the
 // snapshot, kept when it describes the still-streaming message (which the
 // snapshot never contains — state.messages only gains a message at
 // message_end, internal/agent/agent.go processEvents).
+//
+// # Where the snapshot comes from
+//
+// The session file (get_entries → state/history.ts), not get_messages: the
+// latter is the model's context and a compaction rewrites it. Rows built
+// from history keep the turns a compaction summarized away and render the
+// compaction itself as a notice (fromHistory).
 //
 // Identity is role+timestamp: ai.Message has no id, and TimestampMS is the
 // closest thing to one.
@@ -57,7 +64,7 @@ export type BlockView =
 export interface TranscriptMessage {
   /** Stable React key. Messages have no wire id; this is synthesised. */
   key: string;
-  role: "user" | "assistant" | "toolResult";
+  role: "user" | "assistant" | "toolResult" | "notice";
   blocks: BlockView[];
   /** True while deltas are still arriving for this row. */
   streaming: boolean;
@@ -69,7 +76,30 @@ export interface TranscriptMessage {
   toolCallId?: string;
   toolName?: string;
   isError?: boolean;
+  /**
+   * notice-only: which boundary this row marks. A notice is the page's own
+   * rendering of a session entry that is not a message — a compaction or a
+   * branch summary — and it never enters a request.
+   */
+  notice?: NoticeKind;
+  /** notice-only: the entry the notice came from (a stable React/scroll key). */
+  entryId?: string;
+  /** compaction notices only: what the conversation cost before the cut. */
+  tokensBefore?: number;
 }
+
+/** The non-message entries the transcript shows as a boundary marker. */
+export type NoticeKind = "compaction" | "branch";
+
+/**
+ * One row of history, in conversation order — what the page builds its
+ * initial state from. The message variant is the wire's; the other two are
+ * entries the file keeps but the model never sees as themselves.
+ */
+export type HistoryRow =
+  | { kind: "message"; message: WireMessage }
+  | { kind: "compaction"; entryId: string; timestamp: number; summary: string; tokensBefore?: number }
+  | { kind: "branch"; entryId: string; timestamp: number; summary: string };
 
 export interface ToolRun {
   id: string;
@@ -149,6 +179,48 @@ export function fromMessages(messages: WireMessage[]): TranscriptState {
   let state = emptyTranscript();
   for (const message of messages) state = absorbMessage(state, message);
   return state;
+}
+
+/**
+ * Build the initial state from the session's history (state/history.ts).
+ *
+ * This is the load path's builder — NOT fromMessages. get_messages answers
+ * with the model's context, which after a compaction is the summary plus
+ * the kept tail: the user's own words are gone and the summary arrives
+ * framed as a user message, so a page built on it shows the summary wearing
+ * the user's bubble and loses everything before the cut. The session file
+ * keeps every entry; the history projection reads it in order and turns the
+ * compaction entry into a notice row instead of a fake turn.
+ *
+ * fromMessages stays for the one case the file cannot answer: a kernel too
+ * old to serve get_entries (session.ts's fallback).
+ */
+export function fromHistory(rows: HistoryRow[]): TranscriptState {
+  let state = emptyTranscript();
+  for (const row of rows) {
+    state = row.kind === "message" ? absorbMessage(state, row.message) : absorbNotice(state, row);
+  }
+  return state;
+}
+
+/** One boundary marker: a compaction cut or a branch summary. */
+function absorbNotice(
+  state: TranscriptState,
+  row: Extract<HistoryRow, { kind: "compaction" | "branch" }>,
+): TranscriptState {
+  const notice: TranscriptMessage = {
+    key: `m${state.seq}`,
+    role: "notice",
+    blocks: [{ kind: "text", text: row.summary }],
+    streaming: false,
+    timestamp: row.timestamp,
+    notice: row.kind,
+    entryId: row.entryId,
+    ...(row.kind === "compaction" && row.tokensBefore !== undefined && row.tokensBefore > 0
+      ? { tokensBefore: row.tokensBefore }
+      : {}),
+  };
+  return { ...state, messages: [...state.messages, notice], seq: state.seq + 1 };
 }
 
 /** True when the row is one the page shows (system rows are internal). */
@@ -455,10 +527,18 @@ function setBlock(blocks: BlockView[], index: number, block: BlockView): BlockVi
 // Selectors
 // ---------------------------------------------------------------------------
 
-/** The last assistant row's usage — the page's own context-water mark. */
+/**
+ * The last assistant row's usage — the page's own context-water mark.
+ *
+ * Stops at the newest notice: a compaction or branch summary is a context
+ * boundary, so a usage measured before it describes a request that no
+ * longer exists. Without the stop, the water mark would keep reporting the
+ * pre-compaction size right after the user compacted to get rid of it.
+ */
 export function lastUsage(state: TranscriptState): Usage | undefined {
   for (let i = state.messages.length - 1; i >= 0; i--) {
     const row = state.messages[i]!;
+    if (row.role === "notice") return undefined;
     if (row.role === "assistant" && row.usage) return row.usage;
   }
   return undefined;
@@ -466,9 +546,9 @@ export function lastUsage(state: TranscriptState): Usage | undefined {
 
 /**
  * Tokens the next request will carry, as the page can count them: the last
- * assistant message's input plus its cache reads and writes. There is no
- * compaction in this port (plan §4.2), so this is the only context signal
- * the page has — it is an estimate, and it is labelled as one in the UI.
+ * assistant message's input plus its cache reads and writes — measured
+ * after the newest compaction boundary, when there is one. It is an
+ * estimate, and it is labelled as one in the UI.
  */
 export function contextTokens(state: TranscriptState): number | undefined {
   const usage = lastUsage(state);

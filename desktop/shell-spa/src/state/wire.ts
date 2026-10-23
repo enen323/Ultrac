@@ -154,6 +154,40 @@ export interface ForkResult {
   editorText?: string;
 }
 
+/**
+ * WireEntry — one line of the session file, as get_entries carries it
+ * (internal/session/pi_format.go, marshalled by MarshalEntry). The fields
+ * the page reads are the ones the file's entry types define; everything
+ * else on the line (usage, details, systemMessage…) is deliberately not
+ * mirrored here — the page has no use for it, and the Go side is the
+ * authority for the format.
+ *
+ * `type` is an open set: "message" / "compaction" / "branch_summary" /
+ * "custom_message" / "model_change" / "thinking_level_change" /
+ * "session_info" / anything pi adds later.
+ */
+export interface WireEntry {
+  type: string;
+  id?: string;
+  parentId?: string | null;
+  timestamp?: string;
+  /** Present on "message" entries: the provider message, pi-shaped. */
+  message?: WireMessage;
+  /** Present on "custom_message" entries: its content. */
+  content?: string | ContentBlock[];
+  /** Present on compaction / branch_summary entries. */
+  summary?: string;
+  firstKeptEntryId?: string;
+  tokensBefore?: number;
+}
+
+/** get_entries' response data (internal/rpc/server.go cmdGetEntries). */
+export interface GetEntriesData {
+  entries: WireEntry[];
+  /** null before any entry — pi's string | null. */
+  leafId: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Messages and content blocks (ai.Message / ai.ContentBlock)
 // ---------------------------------------------------------------------------
