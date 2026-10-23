@@ -567,6 +567,235 @@ func jsonHas(t *testing.T, s Settings, section, key string) bool {
 	return ok
 }
 
+// ---------------------------------------------------------------------------
+// The compaction carve-out (docs/compaction-branch-plan.md D6): typed on read,
+// key-merged across layers, defaults resolved on the read side, malformed
+// input preserved rather than destroyed.
+// ---------------------------------------------------------------------------
+
+func TestCompactionSectionParsesIntoTypedField(t *testing.T) {
+	s := mustSettings(t, `{
+		"env": {"ANTHROPIC_MODEL": "m"},
+		"compaction": {"enabled": false, "reserveTokens": 8192, "keepRecentTokens": 4096},
+		"hooks": {"PreToolUse": []}
+	}`)
+	if s.Compaction == nil {
+		t.Fatal("compaction section did not parse into the typed field")
+	}
+	if s.Compaction.Enabled == nil || *s.Compaction.Enabled {
+		t.Errorf("enabled = %v, want false", s.Compaction.Enabled)
+	}
+	if s.Compaction.ReserveTokens == nil || *s.Compaction.ReserveTokens != 8192 {
+		t.Errorf("reserveTokens = %v, want 8192", s.Compaction.ReserveTokens)
+	}
+	if s.Compaction.KeepRecentTokens == nil || *s.Compaction.KeepRecentTokens != 4096 {
+		t.Errorf("keepRecentTokens = %v, want 4096", s.Compaction.KeepRecentTokens)
+	}
+	// The carve-out must not swallow the neighbours.
+	if _, ok := s.Extra["hooks"]; !ok {
+		t.Error("the hooks section vanished from Extra")
+	}
+	if _, ok := s.Extra["compaction"]; ok {
+		t.Error("a well-formed compaction section must not also sit in Extra")
+	}
+
+	// Round-trip: marshal writes the typed section back under pi's key names.
+	out := mustJSON(t, s)
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	var section map[string]json.RawMessage
+	if err := json.Unmarshal(doc["compaction"], &section); err != nil {
+		t.Fatalf("marshalled compaction is not an object: %s", doc["compaction"])
+	}
+	for _, key := range []string{"enabled", "reserveTokens", "keepRecentTokens"} {
+		if _, ok := section[key]; !ok {
+			t.Errorf("marshalled section lost %q: %s", key, doc["compaction"])
+		}
+	}
+	if _, ok := doc["hooks"]; !ok {
+		t.Error("marshalling dropped the hooks section")
+	}
+}
+
+func TestCompactionPartialSectionKeepsAbsentKeysAbsent(t *testing.T) {
+	// The whole point of pointer fields: a section that names one key must
+	// not fabricate the others, or a project layer's partial override would
+	// silently pin the user layer's values to zero.
+	s := mustSettings(t, `{"compaction": {"keepRecentTokens": 1234}}`)
+	if s.Compaction == nil {
+		t.Fatal("compaction section did not parse")
+	}
+	if s.Compaction.Enabled != nil || s.Compaction.ReserveTokens != nil {
+		t.Errorf("absent keys were fabricated: %+v", s.Compaction)
+	}
+	if s.Compaction.KeepRecentTokens == nil || *s.Compaction.KeepRecentTokens != 1234 {
+		t.Errorf("keepRecentTokens = %v, want 1234", s.Compaction.KeepRecentTokens)
+	}
+	out := mustJSON(t, s)
+	if strings.Count(string(out), "reserveTokens") != 0 {
+		t.Errorf("absent key was written: %s", out)
+	}
+}
+
+func TestCompactionMergesKeyByKeyAcrossLayers(t *testing.T) {
+	base := mustSettings(t, `{"compaction": {"enabled": false, "reserveTokens": 8192}}`)
+	over := mustSettings(t, `{"compaction": {"keepRecentTokens": 1000}}`)
+	merged := MergeSettings(base, over)
+	if merged.Compaction == nil {
+		t.Fatal("merge dropped the compaction section")
+	}
+	if merged.Compaction.Enabled == nil || *merged.Compaction.Enabled {
+		t.Errorf("enabled = %v, want the base layer's false", merged.Compaction.Enabled)
+	}
+	if merged.Compaction.ReserveTokens == nil || *merged.Compaction.ReserveTokens != 8192 {
+		t.Errorf("reserveTokens = %v, want the base layer's 8192", merged.Compaction.ReserveTokens)
+	}
+	if merged.Compaction.KeepRecentTokens == nil || *merged.Compaction.KeepRecentTokens != 1000 {
+		t.Errorf("keepRecentTokens = %v, want the over layer's 1000", merged.Compaction.KeepRecentTokens)
+	}
+
+	// And the later layer still wins on the keys it names.
+	over2 := mustSettings(t, `{"compaction": {"enabled": true}}`)
+	merged2 := MergeSettings(merged, over2)
+	if merged2.Compaction.Enabled == nil || !*merged2.Compaction.Enabled {
+		t.Errorf("enabled = %v, want the later layer's true", merged2.Compaction.Enabled)
+	}
+	if merged2.Compaction.ReserveTokens == nil || *merged2.Compaction.ReserveTokens != 8192 {
+		t.Error("an unrelated key was lost when a later layer overrode one key")
+	}
+
+	// A layer that never mentions compaction cannot manufacture one.
+	bare := MergeSettings(mustSettings(t, `{"env": {"A": "b"}}`), mustSettings(t, `{}`))
+	if bare.Compaction != nil {
+		t.Errorf("compaction appeared from nowhere: %+v", bare.Compaction)
+	}
+}
+
+func TestCompactionMalformedSectionSurvivesReadWrite(t *testing.T) {
+	// The Extra regression, compaction edition: a section this version
+	// cannot parse must not be destroyed by the next write.
+	home := setupHome(t)
+	path := filepath.Join(home, "settings.json")
+	writeFile(t, path, `{
+		"env": {"ANTHROPIC_MODEL": "m"},
+		"compaction": {"reserveTokens": "lots"}
+	}`)
+
+	r := NewFileResolver()
+	s, err := r.Get(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("a malformed compaction section must not fail the load: %v", err)
+	}
+	if s.Compaction != nil {
+		t.Errorf("a non-integer token count parsed into the typed field: %+v", s.Compaction)
+	}
+	raw, ok := s.Extra["compaction"]
+	if !ok {
+		t.Fatal("the malformed section was dropped instead of parked")
+	}
+	if !strings.Contains(string(raw), "lots") {
+		t.Errorf("parked raw = %s, want the original bytes", raw)
+	}
+
+	// A write (env only) must carry the malformed section through.
+	if err := r.Update(context.Background(), SourceUser, "", func(s *Settings) error {
+		s.Env[EnvAuthToken] = "t"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := out["compaction"]; !ok {
+		t.Errorf("the malformed compaction section was lost on write: %s", data)
+	}
+}
+
+func TestCompactionValidateRejectsNegativeBudgets(t *testing.T) {
+	home := setupHome(t)
+	for _, body := range []string{
+		`{"compaction": {"reserveTokens": -1}}`,
+		`{"compaction": {"keepRecentTokens": -16384}}`,
+	} {
+		writeFile(t, filepath.Join(home, "settings.json"), body)
+		r := NewFileResolver()
+		if _, err := r.Get(context.Background(), t.TempDir()); err == nil {
+			t.Errorf("%s was accepted; a negative budget inverts the trigger line", body)
+		}
+	}
+	// Zero is legal (it disables the reserve / keep window, which is a
+	// choice, not a corruption).
+	writeFile(t, filepath.Join(home, "settings.json"), `{"compaction": {"reserveTokens": 0, "keepRecentTokens": 0}}`)
+	r := NewFileResolver()
+	if _, err := r.Get(context.Background(), t.TempDir()); err != nil {
+		t.Errorf("zero budgets rejected: %v", err)
+	}
+}
+
+func TestCompactionSetGetCarveOut(t *testing.T) {
+	var s Settings
+	if err := json.Unmarshal([]byte(`{"env": {"A": "b"}}`), &s); err != nil {
+		t.Fatal(err)
+	}
+	// Set with a well-formed section populates the typed field.
+	raw := json.RawMessage(`{"enabled":true,"reserveTokens":4096}`)
+	s.Set(compactionKey, raw)
+	if s.Compaction == nil || s.Compaction.Enabled == nil || !*s.Compaction.Enabled {
+		t.Fatalf("Set did not populate the typed field: %+v", s.Compaction)
+	}
+	got, ok := s.Get(compactionKey)
+	if !ok {
+		t.Fatal("Get did not find the compaction section")
+	}
+	var section CompactionSettings
+	if err := json.Unmarshal(got, &section); err != nil {
+		t.Fatal(err)
+	}
+	if section.ReserveTokens == nil || *section.ReserveTokens != 4096 {
+		t.Errorf("Get round-trip lost reserveTokens: %s", got)
+	}
+	// Empty raw deletes, the "blank means remove" contract.
+	s.Set(compactionKey, nil)
+	if s.Compaction != nil {
+		t.Error("Set with an empty value did not delete the section")
+	}
+	if _, ok := s.Get(compactionKey); ok {
+		t.Error("Get still finds the deleted section")
+	}
+}
+
+func TestCompactionSetReplacesParkedMalformedSection(t *testing.T) {
+	// set_auto_compaction on a machine whose file has a broken section: the
+	// write must replace the garbage, not sit beside it.
+	s := mustSettings(t, `{"compaction": "totally not an object"}`)
+	if s.Compaction != nil {
+		t.Fatal("precondition: the malformed section parsed")
+	}
+	if _, ok := s.Extra["compaction"]; !ok {
+		t.Fatal("precondition: the malformed section was not parked")
+	}
+	raw := json.RawMessage(`{"enabled":false}`)
+	s.Set(compactionKey, raw)
+	if s.Compaction == nil || s.Compaction.Enabled == nil || *s.Compaction.Enabled {
+		t.Fatalf("typed field = %+v, want enabled:false", s.Compaction)
+	}
+	if _, parked := s.Extra["compaction"]; parked {
+		t.Error("the parked malformed copy survived beside the typed section")
+	}
+	out := mustJSON(t, s)
+	if strings.Count(string(out), "compaction") != 1 {
+		t.Errorf("the section would be written more than once: %s", out)
+	}
+}
+
 // TestSettingsSetMutatesThroughPointerReceiver pins the receiver of Set.
 //
 // Under the previous value receiver every assignment below wrote to a copy and

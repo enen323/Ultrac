@@ -273,7 +273,7 @@ func isMissingDir(err error) bool {
 }
 
 func isEmpty(s Settings) bool {
-	return len(s.Env) == 0 && len(s.Extra) == 0
+	return len(s.Env) == 0 && len(s.Extra) == 0 && s.Compaction == nil
 }
 
 // MergeSettings deep-merges over into base, later winning.
@@ -282,8 +282,15 @@ func isEmpty(s Settings) bool {
 // TypeScript behaviour (settingsMergeCustomizer) and it is what makes
 // permissions.add work: a user's allow list should extend the policy's, not
 // overwrite it. Everything else is a last-writer-wins deep merge.
+//
+// The typed Compaction section merges key-by-key, not section-by-section:
+// mergeJSON's last-writer-wins would let a project file that names only
+// keepRecentTokens erase the user layer's enabled flag (plan D6).
 func MergeSettings(base, over Settings) Settings {
-	out := Settings{Env: mergeStringMaps(base.Env, over.Env)}
+	out := Settings{
+		Env:        mergeStringMaps(base.Env, over.Env),
+		Compaction: mergeCompaction(base.Compaction, over.Compaction),
+	}
 
 	keys := make(map[string]struct{}, len(base.Extra)+len(over.Extra))
 	for k := range base.Extra {
@@ -323,6 +330,32 @@ func mergeStringMaps(base, over map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// mergeCompaction merges the typed compaction section key-by-key. A nil side
+// contributes nothing, so a layer that never mentioned compaction cannot
+// manufacture one — the defaults stay a read-side concern (plan D6).
+func mergeCompaction(base, over *CompactionSettings) *CompactionSettings {
+	if base == nil {
+		return over
+	}
+	if over == nil {
+		return base
+	}
+	out := *base
+	if over.Enabled != nil {
+		v := *over.Enabled
+		out.Enabled = &v
+	}
+	if over.ReserveTokens != nil {
+		v := *over.ReserveTokens
+		out.ReserveTokens = &v
+	}
+	if over.KeepRecentTokens != nil {
+		v := *over.KeepRecentTokens
+		out.KeepRecentTokens = &v
+	}
+	return &out
 }
 
 // mergeJSON merges two raw JSON values with array-concat semantics.
@@ -386,6 +419,18 @@ func validate(s *Settings) error {
 	for key := range s.Extra {
 		if IsDangerousShellSetting(key) {
 			return fmt.Errorf("config: setting %q executes arbitrary shell commands and is not accepted", key)
+		}
+	}
+	if s.Compaction != nil {
+		// A negative budget inverts the trigger line (window - reserve
+		// grows instead of shrinking) or the keep-recent window, and the
+		// failure would surface as "compaction never fires" with nothing
+		// pointing at the file. Reject it here instead (plan D6).
+		if s.Compaction.ReserveTokens != nil && *s.Compaction.ReserveTokens < 0 {
+			return fmt.Errorf("config: compaction.reserveTokens must be >= 0, got %d", *s.Compaction.ReserveTokens)
+		}
+		if s.Compaction.KeepRecentTokens != nil && *s.Compaction.KeepRecentTokens < 0 {
+			return fmt.Errorf("config: compaction.keepRecentTokens must be >= 0, got %d", *s.Compaction.KeepRecentTokens)
 		}
 	}
 	return nil
