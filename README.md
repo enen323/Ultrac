@@ -1,5 +1,7 @@
 # Ultrac
 
+**English** | [简体中文](README.zh-CN.md)
+
 > A Go coding-agent engine — a from-scratch port of the **pi core harness**
 > (agent loop, event protocol, session format, tools, print/RPC modes).
 > Think, act, observe, repeat — from a single static binary.
@@ -19,41 +21,42 @@ models, and loops through a *think → act → observe* cycle until the job is d
 Ultrac's engine (`cmd/`, `internal/`) is a **Go implementation of pi's core
 harness**, replacing the earlier Claude-Code-shaped TypeScript reconstruction.
 The port plan — decisions, deviations, and per-phase acceptance records — lives in
-[`docs/pi-core-harness-plan.md`](docs/pi-core-harness-plan.md) (the constitution
+[`docs/开发计划/pi-core-harness-plan.md`](docs/开发计划/pi-core-harness-plan.md) (the constitution
 for this work).
 
 **Goals (all met)**
 
-| # | 目标 | 度量方式 |
+| # | Goal | Measure |
 |---|---|---|
-| G1 | 可跑通真实编码任务 | agent 自主 read→edit→bash 闭环，无需人工干预 |
-| G2 | 与 pi 可对照 | 同一 prompt 双跑，事件序列 diff 一致 |
-| G3 | provider 可替换 | 新增一家 = 一个文件 + `init()` 注册，agent 零改动 |
-| G4 | 新增工具不改引擎 | 新增工具 = 一个文件 + `init()` 注册，agent 零改动 |
-| G5 | 零外部运行时 | 单个静态二进制，不依赖 Node / Bun / Python |
-| G6 | 无权限层 | `internal/permission`、`internal/shell` 已从仓库消失（P7） |
+| G1 | Runs real coding tasks | agent completes the read→edit→bash loop autonomously, no human intervention |
+| G2 | Comparable to pi | same prompt double-run, event sequences diff identical |
+| G3 | Swappable providers | new provider = one file + `init()` registration, agent untouched |
+| G4 | New tools without engine changes | new tool = one file + `init()` registration, agent untouched |
+| G5 | Zero external runtime | a single static binary, no Node / Bun / Python dependency |
+| G6 | No permission layer | `internal/permission`, `internal/shell` removed from the repo (P7) |
 
-**非目标（写在这里防蔓延）**
+**Non-goals (written down to prevent scope creep)**
 
-- interactive TUI（Ink/React → bubbletea 是重新设计，不是翻译；计划书 §0.2 论证过为何 pi 语义下不复用 TS TUI）
-- pi 的 `durable` / `chord` / `server` / `client` / CBOR protocol
-- pi 的 `mcp` / `codemode` / `extensions` / `skills` / `telemetry` / `evals`
-- OAuth 登录（只做 API key）；图像/分类器模型
-- compaction（上下文压缩）——超长上下文直接报错
-- **权限系统**——已决策删除（pi 有意不做）
-- 自动下载 `rg` / `fd`——缺失时报错并提示安装
+- interactive TUI (Ink/React → bubbletea is a redesign, not a translation; plan §0.2 argues why the TS TUI isn't reused under pi semantics)
+- pi's `durable` / `chord` / `server` / `client` / CBOR protocol
+- pi's `mcp` / `codemode` / `extensions` / `skills` / `telemetry` / `evals`
+- OAuth login (API key only); image/classifier models
+- compaction (context compression) — over-long contexts error out
+- **permission system** — decided to remove (pi deliberately has none)
+- auto-downloading `rg` / `fd` — missing binaries error out with an install hint
 
-**进度**：P0 ✅ 契约冻结 / P1 ✅ provider 流式（真实端点双 dialect 验收）/ P2 ✅ agent loop + Agent 状态机（假 provider 47 测试）/ P3 ✅ pi 8 工具（133 测试）/ P4 ✅ 会话/配置/提示词（43 新测试）/ P5 ✅ CLI + print/json（真实端点四场景验收）/ P6 ✅ RPC 模式（18 命令，驱动脚本 38/38 断言）/ P7 ✅ 退场清理 + 端到端验收（删 44 文件 / 13,255 行；E1–E7 全过，pi 双跑抓出并修掉两个协议 bug）。
+**Progress**: P0 ✅ contracts frozen / P1 ✅ provider streaming (real-endpoint, both dialects) / P2 ✅ agent loop + Agent state machine (47 tests with a fake provider) / P3 ✅ pi's 8 tools (133 tests) / P4 ✅ session/config/prompt (43 new tests) / P5 ✅ CLI + print/json (four real-endpoint scenarios) / P6 ✅ RPC mode (18 commands, driver script 38/38 assertions) / P7 ✅ retirement cleanup + end-to-end acceptance (44 files / 13,255 lines removed; E1–E7 all pass, the double run caught and fixed two protocol bugs).
 
-**验证关卡（每阶段必过）**：`go build ./cmd/... ./internal/...`、`go vet` 同范围、
-`staticcheck` 全仓、全量 `go test`。P7 起 `./...` 也可跑（TS 树与 node_modules
-已退场），但 Makefile 仍用显式范围。
+**Verification gates (required every phase)**: `go build ./cmd/... ./internal/...`,
+`go vet` on the same scope, `staticcheck` across the whole repo, and the full
+`go test` suite. Since P7 `./...` also works (the TS tree and node_modules are gone),
+but the Makefile still uses explicit scopes.
 
 ## 🚀 Getting Started
 
 Requirements: **Go ≥ 1.26** and a provider credential in `~/.ultrac/settings.json`
-(`env` 块：`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL` 等，
-兼容任意 anthropic-messages 或 openai-completions 端点)。
+(an `env` block: `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL`
+etc., compatible with any anthropic-messages or openai-completions endpoint).
 
 ```bash
 # build (or: make build)
@@ -79,10 +82,70 @@ go build -o bin/ultrac ./cmd/ultrac
 
 `make live-agent` runs the read-only real-endpoint acceptance prompts.
 
+## 🖥️ Desktop App (Electron + React SPA)
+
+The desktop UI is two packages under `desktop/` (the old `reasonix-desktop/` tree is a
+**read-only reference copy** of Reasonix's shell — gitignored, do **not** run it):
+
+- `desktop/shell/` — Electron shell. Spawns `bin/ultrac --mode rpc` and bridges the
+  C4 JSONL protocol over stdio (the pipe *is* the security boundary — no token/gate).
+- `desktop/shell-spa/` — React 19 + Vite + TypeScript SPA, the chat face loaded into
+  the window.
+
+The full design is in [`docs/开发计划/desktop-shell-plan.md`](docs/开发计划/desktop-shell-plan.md).
+
+**Prerequisites**
+
+- Go ≥ 1.26 (to build the kernel — already built as `bin/ultrac.exe` in this repo)
+- Node ≥ 22.18 (the managed `node` 22.22.2 here works)
+- A provider credential in `~/.ultrac/settings.json` (same as the CLI — see above)
+
+**Build & run**
+
+```bash
+# 1. Build the Go kernel (already present as bin/ultrac.exe; rebuild if you change Go code)
+go build -o bin/ultrac ./cmd/ultrac
+
+# 2. Build the SPA — produces desktop/shell-spa/dist/ (the window loads this)
+cd desktop/shell-spa
+npm install
+npm run build
+cd ../..
+
+# 3. Install the Electron shell, then launch it
+cd desktop/shell
+npm install          # pulls electron ^44 (uses the npmmirror electron mirror in .npmrc)
+npm start            # runs `electron .`
+```
+
+The shell auto-discovers the kernel at `bin/ultrac.exe` (dev path
+`desktop/shell/src/../../../bin`) and the page at `desktop/shell-spa/dist`.
+Override either with the env knobs `ULTRAC_BIN` / `ULTRAC_SHELL_PAGE`.
+
+> ⚠️ **Windows / this-machine gotcha:** the environment sets `ELECTRON_RUN_AS_NODE=1`
+> globally, which makes `electron .` degrade to pure Node (no GUI window). Launch with
+> the variable unset:
+>
+> ```bash
+> cd desktop/shell
+> env -u ELECTRON_RUN_AS_NODE npm start
+> ```
+
+**How the pieces fit** (one line): the Electron window loads the SPA; the SPA talks to
+the shell's preload bridge (`kernel:call` / `kernel:event` / `session_loaded` /
+`shell:open-external`); the shell spawns `ultrac --mode rpc` over stdio. Closing the
+window closes stdin, the kernel exits (parent-lease semantics) — no extra plumbing.
+
+**SPA dev loop** (hot reload, no Electron): `cd desktop/shell-spa && npm run dev`
+serves the UI at the Vite dev URL; point it at a running RPC kernel for live testing.
+
 ## 🗂️ Project Structure
 
 ```
 cmd/ultrac/          # CLI: flags, print mode, RPC mode, diagnostics, shared assembly
+desktop/            # Electron shell + React SPA (see "🖥️ Desktop App" above)
+├── shell/           #   Electron shell — spawns `ultrac --mode rpc`, JSONL bridge
+└── shell-spa/       #   React 19 + Vite SPA — the chat UI loaded into the window
 internal/
 ├── agent/           # C3: agent loop, Agent state machine, tool-call execution
 ├── ai/              # C1+C2: message/event types, provider registry, dialect adapters
@@ -117,7 +180,7 @@ the plan's P7 record.
 Layered resolution (user `~/.ultrac/settings.json` → project `.ultrac/settings.json`
 → env → defaults), with host-management and safe-allowlist filters reported by
 `ultrac config`. The resolution order is described in
-[`docs/config-loading.md`](docs/config-loading.md) (written for the TS era; the Go
+[`docs/项目理解/config-loading.md`](docs/项目理解/config-loading.md) (written for the TS era; the Go
 layer mirrors the same order — see `internal/config/`).
 
 ## 📜 Note on the TypeScript tree
