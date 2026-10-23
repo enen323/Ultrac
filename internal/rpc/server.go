@@ -26,24 +26,26 @@
 // get_available_thinking_levels, set_steering_mode, set_follow_up_mode,
 // get_messages, get_last_assistant_text, set_session_name, get_entries,
 // get_commands, list_sessions, resume_session, compact,
-// set_auto_compaction.
+// set_auto_compaction, fork, clone, get_fork_messages, get_tree.
 //
 // list_sessions and resume_session are Ultrac extensions beyond pi's set
 // (types.go explains why and what pi's switch_session would have been);
 // compact and set_auto_compaction are pi's own, landed with P-C2 of
-// docs/compaction-branch-plan.md.
+// docs/compaction-branch-plan.md; fork / clone / get_fork_messages /
+// get_tree are pi's branch quartet, landed with P-C4.
 //
 // Not implemented (rpc-types.ts has them; this port does not):
 // set_auto_retry, abort_retry, bash, abort_bash, export_html,
-// switch_session, fork, clone, get_fork_messages, get_tree,
-// get_session_stats, cycle_model, cycle_thinking_level, and the
-// extension_ui_* pair. They fall through to the unknown-command branch
-// with a clear error rather than being silently dropped — the branch tree
-// is P-C3/P-C4 of the compaction plan, and a client that sends one learns
-// it is unsupported instead of waiting for a response that never comes.
+// switch_session, get_session_stats, cycle_model, cycle_thinking_level,
+// and the extension_ui_* pair. They fall through to the unknown-command
+// branch with a clear error rather than being silently dropped — switch
+// _session in particular stays unimplemented because resume_session is its
+// semantic twin here (see types.go), and the rest belong to subsystems
+// this port has none of.
 package rpc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -137,6 +139,35 @@ type Host interface {
 	// AutoCompactionEnabled reports the resolved auto-compaction gate —
 	// the settings value, not the runtime state.
 	AutoCompactionEnabled() bool
+
+	// Fork moves the session leaf to branch from entryID (pi's navigateTree
+	// without the summary, agent-session.ts:4113-4128 — plan D7). A user
+	// message target moves the leaf to the message's parent (the
+	// resetLeaf position for a root message) and returns the message's
+	// text for the client's editor; any other target moves the leaf to the
+	// target itself. The host aborts any active run first, the way every
+	// other session-mutating command does, and re-seeds the agent from the
+	// fork-point projection so the next prompt carries the branch's
+	// context rather than the abandoned history. leafID is "" for the
+	// before-any-entry position; editorText is "" for non-user targets.
+	// The error is the entry not existing (pi's "Invalid entry ID for
+	// forking").
+	Fork(entryID string) (leafID, editorText string, err error)
+	// GetForkMessages lists the fork selector's candidates: every user
+	// message with text, in file order (pi's getUserMessagesForForking).
+	GetForkMessages() ([]session.ForkMessage, error)
+	// GetTree returns the whole session forest plus the current leaf id
+	// ("" before any entry) — pi's getTree behind the get_tree command
+	// (rpc-mode.ts:649-651, plan D8).
+	GetTree() (tree []*session.TreeNode, leafID string, err error)
+	// Clone extracts the current root→leaf path into a new session file
+	// and returns its path (pi's clone → createBranchedSession,
+	// rpc-mode.ts:619-629). The live session is untouched — switching to
+	// the clone is the client's resume_session, the twin of pi's
+	// switch_session. The error is the session having no leaf yet (pi's
+	// "Cannot clone session: no current entry selected") or the extraction
+	// failing.
+	Clone() (string, error)
 }
 
 // PromptInput is one prompt command's assembled messages.
@@ -314,6 +345,14 @@ func (s *Server) dispatch(cmd RpcCommand) (RpcResponse, func()) {
 		return s.cmdCompact(cmd), nil
 	case CmdSetAutoCompaction:
 		return s.cmdSetAutoCompaction(cmd), nil
+	case CmdFork:
+		return s.cmdFork(cmd), nil
+	case CmdClone:
+		return s.cmdClone(cmd), nil
+	case CmdGetForkMessages:
+		return s.cmdGetForkMessages(cmd), nil
+	case CmdGetTree:
+		return s.cmdGetTree(cmd), nil
 	default:
 		// Unknown command: a clear error, never a crash (plan DoD). This is
 		// also where every pi command this port deliberately does not
@@ -534,15 +573,34 @@ func (s *Server) cmdGetEntries(cmd RpcCommand) RpcResponse {
 		}
 		entries = entries[idx+1:]
 	}
-	// leafId is null, not "", before any entry (pi: leafId: string | null).
-	var leaf any
-	if id := mgr.GetLeafID(); id != "" {
-		leaf = id
+	// Entries leave through MarshalEntry, not the struct: SessionEntry's
+	// Extra is json:"-" (a struct tag cannot express pi's flat line), so a
+	// plain marshal would drop every type-specific body — compaction
+	// summaries, branch-summary details, usage — that pi puts on this
+	// wire. Same reason get_tree's nodes carry raw entry lines.
+	lines, err := marshalEntryLines(entries)
+	if err != nil {
+		return errorResponse(cmd.ID, CmdGetEntries, err.Error())
 	}
+	// leafId is null, not "", before any entry (pi: leafId: string | null).
 	return successResponse(cmd.ID, CmdGetEntries, map[string]any{
-		"entries": entries,
-		"leafId":  leaf,
+		"entries": lines,
+		"leafId":  leafOrNull(mgr.GetLeafID()),
 	})
+}
+
+// marshalEntryLines encodes entries as the file carries them: one JSON
+// object per entry, Extra merged in under pi's exact key names.
+func marshalEntryLines(entries []session.SessionEntry) ([]json.RawMessage, error) {
+	lines := make([]json.RawMessage, 0, len(entries))
+	for i := range entries {
+		line, err := session.MarshalEntry(&entries[i])
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, json.RawMessage(bytes.TrimSuffix(line, []byte("\n"))))
+	}
+	return lines, nil
 }
 
 func (s *Server) cmdGetCommands(cmd RpcCommand) RpcResponse {
@@ -580,6 +638,83 @@ func (s *Server) cmdSetAutoCompaction(cmd RpcCommand) RpcResponse {
 		return errorResponse(cmd.ID, CmdSetAutoCompaction, err.Error())
 	}
 	return successResponse(cmd.ID, CmdSetAutoCompaction, nil)
+}
+
+// ---------------------------------------------------------------------------
+// Branch tree (P-C4)
+// ---------------------------------------------------------------------------
+
+func (s *Server) cmdFork(cmd RpcCommand) RpcResponse {
+	// The host owns the whole decision (plan D7): abort the run, resolve
+	// the target, move the leaf, re-seed the agent from the fork-point
+	// projection. What is left here is the wire shape: leafId null — not
+	// "" — in the before-any-entry position (pi: leafId: string | null),
+	// and editorText absent rather than empty when the target was not a
+	// user message (pi drops an undefined selectedText).
+	leafID, editorText, err := s.host.Fork(cmd.EntryID)
+	if err != nil {
+		return errorResponse(cmd.ID, CmdFork, err.Error())
+	}
+	data := map[string]any{"leafId": leafOrNull(leafID)}
+	if editorText != "" {
+		data["editorText"] = editorText
+	}
+	return successResponse(cmd.ID, CmdFork, data)
+}
+
+func (s *Server) cmdGetForkMessages(cmd RpcCommand) RpcResponse {
+	// The selector's options, straight from the session (pi:
+	// getUserMessagesForForking → rpc-mode.ts:631-634). An empty list is a
+	// success with an empty array — a session with no user messages has
+	// nothing to fork from, which is not an error.
+	messages, err := s.host.GetForkMessages()
+	if err != nil {
+		return errorResponse(cmd.ID, CmdGetForkMessages, err.Error())
+	}
+	if messages == nil {
+		messages = []session.ForkMessage{}
+	}
+	return successResponse(cmd.ID, CmdGetForkMessages, map[string]any{"messages": messages})
+}
+
+func (s *Server) cmdGetTree(cmd RpcCommand) RpcResponse {
+	// The whole forest plus the leaf (pi: rpc-mode.ts:649-651). The tree's
+	// entries arrive through MarshalEntry — every field the file carries,
+	// Extra included — and label is absent because this version writes no
+	// label entries (plan D8).
+	tree, leafID, err := s.host.GetTree()
+	if err != nil {
+		return errorResponse(cmd.ID, CmdGetTree, err.Error())
+	}
+	if tree == nil {
+		tree = []*session.TreeNode{}
+	}
+	return successResponse(cmd.ID, CmdGetTree, map[string]any{
+		"tree":   tree,
+		"leafId": leafOrNull(leafID),
+	})
+}
+
+func (s *Server) cmdClone(cmd RpcCommand) RpcResponse {
+	// The path of the freshly written root→leaf extraction. Switching to
+	// it is the client's resume_session — pi rebinds its runtime here
+	// (rpc-mode.ts:619-629), this port's twin of switch_session is
+	// resume_session (plan D7's note), so the clone answers with the path
+	// and leaves the switch to the client.
+	path, err := s.host.Clone()
+	if err != nil {
+		return errorResponse(cmd.ID, CmdClone, err.Error())
+	}
+	return successResponse(cmd.ID, CmdClone, map[string]any{"sessionPath": path})
+}
+
+// leafOrNull maps the manager's "" leaf (before any entry) to JSON null,
+// the way pi types leafId (string | null).
+func leafOrNull(leafID string) any {
+	if leafID == "" {
+		return nil
+	}
+	return leafID
 }
 
 // ---------------------------------------------------------------------------

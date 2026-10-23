@@ -311,6 +311,87 @@ func (host *rpcHost) IsCompacting() bool { return host.h.compactor.IsCompacting(
 
 func (host *rpcHost) AutoCompactionEnabled() bool { return host.h.compactor.AutoEnabled() }
 
+// Fork moves the session leaf to branch from entryID (plan D7: pi's
+// navigateTree without the summary, agent-session.ts:4113-4128).
+//
+// The ordering mirrors every other session-mutating command here: abort
+// any active run and wait for it to settle before touching the tree — a
+// leaf that moves under a live run would have the run's next append land
+// on the abandoned branch. pi gets the same guarantee by tearing the
+// runtime down (agent-session-runtime.ts:289-291).
+//
+// The re-seed is the authority fix in the other direction: the session's
+// leaf moved, so the agent's transcript must be the fork point's
+// projection, not the history being left behind — otherwise the next
+// prompt replays the abandoned branch (pi's _refreshFinalizedContext,
+// agent-session.ts:4162). ReplaceMessages is the P-C2 D2 primitive, used
+// here for navigation instead of compression.
+func (host *rpcHost) Fork(entryID string) (string, string, error) {
+	old := host.Agent()
+	old.Abort()
+	waitCtx, cancel := context.WithTimeout(context.Background(), settleWait)
+	defer cancel()
+	_ = old.WaitForIdle(waitCtx)
+
+	mgr := host.Session()
+	move, err := session.PlanFork(mgr.TreeEntries(), entryID, mgr.GetLeafID())
+	if err != nil {
+		return "", "", err
+	}
+	if move.NoOp {
+		// Already there: nothing moves, and pi returns no editor text.
+		return mgr.GetLeafID(), "", nil
+	}
+	if move.LeafID == "" {
+		mgr.ResetLeaf()
+	} else if err := mgr.Branch(move.LeafID); err != nil {
+		return "", "", err
+	}
+	host.Agent().ReplaceMessages(mgr.BuildSessionContext().Messages)
+	return move.LeafID, move.EditorText, nil
+}
+
+// GetForkMessages lists the fork selector's candidates — every user
+// message with text, in file order (pi's getUserMessagesForForking,
+// agent-session.ts:4186-4201).
+func (host *rpcHost) GetForkMessages() ([]session.ForkMessage, error) {
+	return session.UserForkMessages(host.Session().TreeEntries()), nil
+}
+
+// GetTree returns the whole session forest plus the current leaf (pi's
+// getTree behind rpc-mode.ts:649-651, plan D8's shape).
+func (host *rpcHost) GetTree() ([]*session.TreeNode, string, error) {
+	mgr := host.Session()
+	tree, err := session.BuildTree(mgr.TreeEntries())
+	if err != nil {
+		return nil, "", err
+	}
+	return tree, mgr.GetLeafID(), nil
+}
+
+// Clone extracts the current root→leaf path into a new session file and
+// returns its path (pi's clone → createBranchedSession,
+// rpc-mode.ts:619-629).
+//
+// The live session is deliberately not swapped: pi rebinds its runtime to
+// the extracted file here, while this port's session switch is
+// resume_session (the switch_session twin, types.go) — so the client gets
+// the path and resumes it, and the conversation in flight keeps its
+// transcript. No abort either: the extraction reads the tree and writes a
+// snapshot, and an append racing it lands in the source file as usual —
+// the worst case is a clone that misses the very last entry, which the
+// client sees on the next listing.
+func (host *rpcHost) Clone() (string, error) {
+	mgr := host.Session()
+	leaf := mgr.GetLeafID()
+	if leaf == "" {
+		// Wire literal must match pi byte-for-byte (rpc-mode.ts:622).
+		//lint:ignore ST1005 wire literal matches pi
+		return "", fmt.Errorf("Cannot clone session: no current entry selected")
+	}
+	return mgr.CreateBranchedSession(leaf)
+}
+
 // -- entry point -----------------------------------------------------------------
 
 // runRPC is the CLI entry for --mode rpc.

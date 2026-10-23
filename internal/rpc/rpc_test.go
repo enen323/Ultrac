@@ -345,6 +345,92 @@ func (h *testHost) ResumeSession(path string) error {
 	return nil
 }
 
+// Fork applies pi's navigateTree decision to the live session and re-seeds
+// the agent from the fork-point projection — the real host's shape
+// (cmd/ultrac's rpcHost.Fork) at protocol scale. The abort wait is the one
+// piece skipped: no protocol test forks mid-run (serve settles a prompt
+// batch before returning).
+func (h *testHost) Fork(entryID string) (leafID, editorText string, err error) {
+	mgr := h.Session()
+	move, err := session.PlanFork(mgr.TreeEntries(), entryID, mgr.GetLeafID())
+	if err != nil {
+		return "", "", err
+	}
+	if move.NoOp {
+		// Already there: nothing moves, and pi returns no editor text.
+		return mgr.GetLeafID(), "", nil
+	}
+	if move.LeafID == "" {
+		mgr.ResetLeaf()
+	} else if err := mgr.Branch(move.LeafID); err != nil {
+		return "", "", err
+	}
+	// D2: the session is authoritative — the agent's transcript becomes the
+	// fork point's projection, not the history being left behind, so the
+	// next prompt cannot replay the abandoned branch.
+	h.Agent().ReplaceMessages(mgr.BuildSessionContext().Messages)
+	return move.LeafID, move.EditorText, nil
+}
+
+// GetForkMessages lists the selector's candidates straight from the session
+// (pi's getUserMessagesForForking) — the real host delegates the same way.
+func (h *testHost) GetForkMessages() ([]session.ForkMessage, error) {
+	return session.UserForkMessages(h.Session().TreeEntries()), nil
+}
+
+// GetTree returns the forest plus the leaf, straight from the session (pi's
+// getTree) — again the real host's delegation.
+func (h *testHost) GetTree() ([]*session.TreeNode, string, error) {
+	mgr := h.Session()
+	tree, err := session.BuildTree(mgr.TreeEntries())
+	if err != nil {
+		return nil, "", err
+	}
+	return tree, mgr.GetLeafID(), nil
+}
+
+// Clone delegates to the real extraction (CreateBranchedSession): the
+// protocol half is just the path, and the extraction is the session
+// package's, tested there. The leaf check comes first because it is the
+// client-visible shape: pi's own error text for the no-leaf case
+// (rpc-mode.ts:622), before the extraction's no-file refusal.
+func (h *testHost) Clone() (string, error) {
+	mgr := h.Session()
+	leaf := mgr.GetLeafID()
+	if leaf == "" {
+		// The wire literal matches pi byte-for-byte (rpc-mode.ts:622).
+		// staticcheck skips ST1005 in test files, so no directive here.
+		return "", errors.New("Cannot clone session: no current entry selected")
+	}
+	return mgr.CreateBranchedSession(leaf)
+}
+
+// useFileSession swaps in a file-backed session with one user/assistant
+// exchange per pair, so the clone tests run against a real transcript —
+// the in-memory default has no file to branch. The config home is
+// redirected so no test touches ~/.ultrac, the same recipe as
+// writeSessionFile.
+func (h *testHost) useFileSession(t *testing.T, pairs ...[2]string) {
+	t.Helper()
+	home := filepath.Join(t.TempDir(), ".ultrac")
+	t.Setenv(config.EnvConfigDir, home)
+	m := session.CreateSession(h.cwd)
+	for _, p := range pairs {
+		now := time.Now().UnixMilli()
+		for _, msg := range []ai.Message{
+			{Role: ai.RoleUser, Content: []ai.ContentBlock{ai.TextBlock(p[0])}, TimestampMS: now},
+			{Role: ai.RoleAssistant, Content: []ai.ContentBlock{ai.TextBlock(p[1])}, TimestampMS: now},
+		} {
+			if _, err := m.AppendMessage(msg); err != nil {
+				t.Fatalf("AppendMessage: %v", err)
+			}
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.session = m
+}
+
 // ---------------------------------------------------------------------------
 // Scripts
 // ---------------------------------------------------------------------------
@@ -1636,4 +1722,291 @@ func mustMessage(t *testing.T, v any) ai.Message {
 		t.Fatal(err)
 	}
 	return m
+}
+
+// ---------------------------------------------------------------------------
+// Branch tree (P-C4): fork / get_fork_messages / get_tree / clone
+// ---------------------------------------------------------------------------
+
+// runTwoExchanges drives two prompts so the session holds
+// user "one" → assistant → user "two" → assistant, leaf on the last
+// assistant message. Every branch test starts from this shape, and the
+// two scripts answer "a1"/"a2" so the branches stay distinguishable.
+func runTwoExchanges(t *testing.T, h *testHost) {
+	t.Helper()
+	h.serve(t, cmd("prompt", map[string]any{"message": "one"}))
+	h.serve(t, cmd("prompt", map[string]any{"message": "two"}))
+}
+
+// entryIDs lists the entry ids in file order from a get_entries response.
+func entryIDs(t *testing.T, lines []map[string]any, command string) []string {
+	t.Helper()
+	entries, _ := dataMap(t, response(t, lines, command))["entries"].([]any)
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.(map[string]any)["id"].(string))
+	}
+	return out
+}
+
+// treeNodeByID finds one node in a get_tree forest by entry id.
+func treeNodeByID(t *testing.T, forest any, id string) map[string]any {
+	t.Helper()
+	nodes, _ := forest.([]any)
+	for _, n := range nodes {
+		m := n.(map[string]any)
+		entry, _ := m["entry"].(map[string]any)
+		if entry != nil && entry["id"] == id {
+			return m
+		}
+		if child := treeNodeByID(t, m["children"], id); child != nil {
+			return child
+		}
+	}
+	return nil
+}
+
+// transcriptTexts is the text of every message in one recorded provider
+// call's transcript (h.transcripts), read under the host lock.
+func (h *testHost) transcriptTexts(call int) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if call >= len(h.transcripts) {
+		return nil
+	}
+	var out []string
+	for _, m := range h.transcripts[call].Messages {
+		out = append(out, ai.MessageText(m))
+	}
+	return out
+}
+
+func TestForkToRootUserMessageResetsLeafAndSeedsEditor(t *testing.T) {
+	h := newTestHost(t, textScript("a1"), textScript("a2"), textScript("a3"))
+	runTwoExchanges(t, h)
+
+	// The selector's candidates: both user messages, in file order.
+	fm := dataMap(t, response(t, h.serve(t, cmd("get_fork_messages", nil)), "get_fork_messages"))
+	msgs, _ := fm["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("fork messages = %d, want 2", len(msgs))
+	}
+	if got := msgs[0].(map[string]any)["text"]; got != "one" {
+		t.Errorf("first candidate text = %v, want one", got)
+	}
+	if got := msgs[1].(map[string]any)["text"]; got != "two" {
+		t.Errorf("second candidate text = %v, want two", got)
+	}
+	firstUserID := msgs[0].(map[string]any)["entryId"].(string)
+
+	// Fork to the first user message: it is a root, so the leaf lands in
+	// the before-any-entry position — leafId null, not "" — and the
+	// message's text comes back for the editor.
+	fk := dataMap(t, response(t, h.serve(t, cmd("fork", map[string]any{"entryId": firstUserID})), "fork"))
+	if fk["leafId"] != nil {
+		t.Errorf("leafId = %v, want null (a root user message resets the leaf)", fk["leafId"])
+	}
+	if fk["editorText"] != "one" {
+		t.Errorf("editorText = %v, want one", fk["editorText"])
+	}
+
+	// A follow-up prompt from the reset leaf starts a second root: the
+	// forest has two trees now, the abandoned branch and the new one.
+	h.serve(t, cmd("prompt", map[string]any{"message": "three"}))
+	gt := dataMap(t, response(t, h.serve(t, cmd("get_tree", nil)), "get_tree"))
+	tree, _ := gt["tree"].([]any)
+	if len(tree) != 2 {
+		t.Fatalf("tree roots = %d, want 2 (the fork opened a new root)", len(tree))
+	}
+	if gt["leafId"] == nil {
+		t.Error("leafId must be set once the new branch has entries")
+	}
+
+	// D2, observed on the wire: the third run's transcript is the fork
+	// point's projection plus the new message — the abandoned tail
+	// ("two", "a2") must not ride along.
+	texts := h.transcriptTexts(2)
+	if len(texts) != 1 || texts[0] != "three" {
+		t.Errorf("third run transcript = %v, want just the new message", texts)
+	}
+}
+
+func TestForkToNonUserMessageMovesLeafToTarget(t *testing.T) {
+	h := newTestHost(t, textScript("a1"), textScript("a2"), textScript("a3"))
+	runTwoExchanges(t, h)
+	ids := entryIDs(t, h.serve(t, cmd("get_entries", nil)), "get_entries")
+	// File order: user one, assistant one, user two, assistant two.
+	if len(ids) != 4 {
+		t.Fatalf("entries = %d, want 4", len(ids))
+	}
+	assistantOne := ids[1]
+
+	fk := dataMap(t, response(t, h.serve(t, cmd("fork", map[string]any{"entryId": assistantOne})), "fork"))
+	if fk["leafId"] != assistantOne {
+		t.Errorf("leafId = %v, want the assistant entry %s", fk["leafId"], assistantOne)
+	}
+	if _, present := fk["editorText"]; present {
+		t.Errorf("editorText = %v, want absent (pi drops an undefined selectedText)", fk["editorText"])
+	}
+
+	// The next prompt appends as a child of the fork point: one root, and
+	// the fork point carries two children — the abandoned tail and the
+	// new branch.
+	h.serve(t, cmd("prompt", map[string]any{"message": "three"}))
+	gt := dataMap(t, response(t, h.serve(t, cmd("get_tree", nil)), "get_tree"))
+	tree, _ := gt["tree"].([]any)
+	if len(tree) != 1 {
+		t.Fatalf("tree roots = %d, want 1", len(tree))
+	}
+	node := treeNodeByID(t, gt["tree"], assistantOne)
+	if node == nil {
+		t.Fatalf("fork point %s missing from the tree", assistantOne)
+	}
+	children, _ := node["children"].([]any)
+	if len(children) != 2 {
+		t.Fatalf("fork point children = %d, want 2 (abandoned tail + new branch)", len(children))
+	}
+	if gt["leafId"] == nil {
+		t.Error("leafId must be set on the new branch")
+	}
+
+	// D2 again: the third run sees the prefix up to the fork point, not
+	// the abandoned second exchange.
+	texts := h.transcriptTexts(2)
+	if len(texts) != 3 || texts[0] != "one" || texts[1] != "a1" || texts[2] != "three" {
+		t.Errorf("third run transcript = %v, want [one a1 three]", texts)
+	}
+}
+
+func TestForkNoOpAndUnknownEntry(t *testing.T) {
+	h := newTestHost(t, textScript("a1"), textScript("a2"))
+	runTwoExchanges(t, h)
+	leaf := dataMap(t, response(t, h.serve(t, cmd("get_entries", nil)), "get_entries"))["leafId"]
+
+	// Forking to the current leaf moves nothing (pi's early return): the
+	// leaf comes back and no editor text.
+	fk := dataMap(t, response(t, h.serve(t, cmd("fork", map[string]any{"entryId": leaf})), "fork"))
+	if fk["leafId"] != leaf {
+		t.Errorf("leafId = %v, want the unchanged leaf %v", fk["leafId"], leaf)
+	}
+	if _, present := fk["editorText"]; present {
+		t.Errorf("editorText = %v, want absent for a no-op", fk["editorText"])
+	}
+
+	// An unknown id is pi's wire literal, verbatim.
+	bad := response(t, h.serve(t, cmd("fork", map[string]any{"entryId": "nope"})), "fork")
+	if bad["success"] != false {
+		t.Error("an unknown entry id must fail")
+	} else if msg, _ := bad["error"].(string); msg != "Invalid entry ID for forking" {
+		t.Errorf("error = %q, want pi's literal", msg)
+	}
+}
+
+func TestGetTreeCarriesEntryBodiesAndLeaf(t *testing.T) {
+	h := newTestHost(t, textScript("a1"))
+	h.serve(t, cmd("prompt", map[string]any{"message": "one"}))
+
+	gt := dataMap(t, response(t, h.serve(t, cmd("get_tree", nil)), "get_tree"))
+	tree, _ := gt["tree"].([]any)
+	if len(tree) != 1 {
+		t.Fatalf("tree roots = %d, want 1", len(tree))
+	}
+	root := tree[0].(map[string]any)
+	entry, _ := root["entry"].(map[string]any)
+	if entry == nil {
+		t.Fatal("the root node carries no entry")
+	}
+	if entry["type"] != "message" {
+		t.Errorf("entry type = %v, want message", entry["type"])
+	}
+	// The entry body rides on the wire: SessionEntry.Extra is json:"-",
+	// so a struct marshal would have dropped it (pi's node is the whole
+	// line, and get_entries was fixed the same way).
+	msg, _ := entry["message"].(map[string]any)
+	if msg == nil || msg["role"] != "user" {
+		t.Fatalf("entry message = %v, want a user message", entry["message"])
+	}
+	children, _ := root["children"].([]any)
+	if len(children) != 1 {
+		t.Fatalf("root children = %d, want 1 (the assistant reply)", len(children))
+	}
+	child := children[0].(map[string]any)
+	childEntry, _ := child["entry"].(map[string]any)
+	if childEntry == nil || childEntry["id"] != gt["leafId"] {
+		t.Errorf("leafId = %v, want the assistant entry %v", gt["leafId"], childEntry["id"])
+	}
+}
+
+func TestCloneWritesBranchedFileAndItResumes(t *testing.T) {
+	h := newTestHost(t, textScript("a1"))
+	h.useFileSession(t, [2]string{"kept question", "kept answer"})
+	src := h.Session().SessionFile()
+	if src == "" {
+		t.Fatal("useFileSession must leave a file behind")
+	}
+
+	path, _ := dataMap(t, response(t, h.serve(t, cmd("clone", nil)), "clone"))["sessionPath"].(string)
+	if path == "" {
+		t.Fatal("clone answered no sessionPath")
+	}
+	if path == src {
+		t.Fatal("clone must write a new file, not answer the source's path")
+	}
+
+	// The extraction is the source's root→leaf path: reopening the clone
+	// yields the same entries in the same order, header linked to the
+	// file they came from (pi's parentSession).
+	cloneMgr, err := session.OpenSession(path)
+	if err != nil {
+		t.Fatalf("OpenSession(clone): %v", err)
+	}
+	srcEntries := entryIDs(t, h.serve(t, cmd("get_entries", nil)), "get_entries")
+	cloneIDs := make([]string, 0)
+	for _, e := range cloneMgr.Entries() {
+		cloneIDs = append(cloneIDs, e.ID)
+	}
+	if len(cloneIDs) != len(srcEntries) {
+		t.Fatalf("clone entries = %v, want the source's %v", cloneIDs, srcEntries)
+	}
+	for i := range srcEntries {
+		if cloneIDs[i] != srcEntries[i] {
+			t.Errorf("clone entry %d = %s, want %s (ids preserved verbatim)", i, cloneIDs[i], srcEntries[i])
+		}
+	}
+	if got := cloneMgr.Header().ParentSession; got != src {
+		t.Errorf("clone parentSession = %q, want %q", got, src)
+	}
+
+	// And it is resumable through the protocol — the client's next step
+	// after clone (pi rebinds its runtime here; this port's twin of
+	// switch_session is resume_session).
+	r := response(t, h.serve(t, cmd("resume_session", map[string]any{"sessionPath": path})), "resume_session")
+	if r["success"] != true {
+		t.Fatalf("resume_session(clone) = %v", r)
+	}
+	after := entryIDs(t, h.serve(t, cmd("get_entries", nil)), "get_entries")
+	if len(after) != len(srcEntries) {
+		t.Errorf("resumed entries = %v, want %v", after, srcEntries)
+	}
+}
+
+func TestCloneErrors(t *testing.T) {
+	// No entries at all: pi's literal for the no-leaf case (rpc-mode.ts:622).
+	h := newTestHost(t)
+	bad := response(t, h.serve(t, cmd("clone", nil)), "clone")
+	if bad["success"] != false {
+		t.Error("cloning an empty session must fail")
+	} else if msg, _ := bad["error"].(string); msg != "Cannot clone session: no current entry selected" {
+		t.Errorf("error = %q, want pi's literal", msg)
+	}
+
+	// Entries but no file behind them (the in-memory default): the
+	// extraction's own refusal, surfaced verbatim.
+	h.serve(t, cmd("prompt", map[string]any{"message": "one"}))
+	bad = response(t, h.serve(t, cmd("clone", nil)), "clone")
+	if bad["success"] != false {
+		t.Error("cloning a session with no file must fail")
+	} else if msg, _ := bad["error"].(string); msg != "session: cannot branch a session with no file behind it" {
+		t.Errorf("error = %q, want the extraction's refusal", msg)
+	}
 }

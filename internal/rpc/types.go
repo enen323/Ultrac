@@ -47,11 +47,11 @@ type ImageContent struct {
 // RpcCommand is one line of stdin: a discriminant plus the fields the
 // commands in this port use.
 //
-// Fields belonging to commands this port does not implement (bash, fork,
-// switch_session, …) are deliberately absent: an unimplemented command falls
-// through to the unknown-command branch with a clear error rather than being
-// silently accepted and dropped. The set of implemented commands is
-// documented on the dispatch switch in server.go.
+// Fields belonging to commands this port does not implement (bash,
+// switch_session, …) are deliberately absent: an unimplemented command
+// falls through to the unknown-command branch with a clear error rather
+// than being silently accepted and dropped. The set of implemented
+// commands is documented on the dispatch switch in server.go.
 type RpcCommand struct {
 	// ID correlates the command with its response. Optional: a command
 	// without one gets a response without one (pi: rpc-types.ts:20+).
@@ -96,6 +96,10 @@ type RpcCommand struct {
 	// it as a plain boolean), and answering a malformed command with a
 	// silent "disabled" is how a client's typo becomes a setting.
 	Enabled *bool `json:"enabled,omitempty"`
+
+	// fork / clone. fork names the entry to branch from; clone forks the
+	// current leaf and takes no argument.
+	EntryID string `json:"entryId,omitempty"`
 }
 
 // Command types. The closed set this port implements; anything else is
@@ -137,7 +141,18 @@ const (
 	// (CompactResult below), set_auto_compaction with nothing.
 	CmdCompact           = "compact"
 	CmdSetAutoCompaction = "set_auto_compaction"
-	cmdParse             = "parse" // not a command: the parse-error response
+	// CmdFork / CmdClone / CmdGetForkMessages / CmdGetTree are pi's branch
+	// quartet (rpc-types.ts:62-66, rpc-mode.ts:611-651), landed with P-C4
+	// of docs/compaction-branch-plan.md over the P-C3 write API
+	// (Branch / ResetLeaf / CreateBranchedSession). The response shapes
+	// follow the plan's §5.3 table, which is pi's minus the pieces this
+	// port has no runtime replacement for (see each command's doc on the
+	// dispatch switch).
+	CmdFork            = "fork"
+	CmdClone           = "clone"
+	CmdGetForkMessages = "get_fork_messages"
+	CmdGetTree         = "get_tree"
+	cmdParse           = "parse" // not a command: the parse-error response
 )
 
 // Dispositions a prompt-shaped command reports.
