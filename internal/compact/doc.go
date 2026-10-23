@@ -8,9 +8,11 @@
 // projection) and exposes the projection this package plans over
 // (session.BuildProjection). This package owns everything that has no disk in
 // it: the settings, the cut-point algorithm, the conversation serialization,
-// the one-shot summarization LLM call, and the Prepare/Run orchestration that
-// turns a branch into a Result. The caller (cmd/ultrac in P-C2) writes the
-// Result through session.AppendCompaction and swaps the agent's context.
+// the one-shot summarization LLM call, the Prepare/Run orchestration that
+// turns a branch into a Result, and the branch-summary collection and
+// generation (P-C3). The caller (cmd/ultrac in P-C2) writes the
+// Result through session.AppendCompaction and swaps the agent's context;
+// branch summaries are written through session.BranchWithSummary.
 //
 // # What is deliberately not here (yet)
 //
@@ -22,5 +24,8 @@
 //   - Overflow-triggered compaction (provider-reported context overflow): the
 //     plan's D1 keeps the reason enum's "overflow" value reserved but
 //     unproduced in this version.
-//   - Branch summaries (branchWithSummary / BRANCH_SUMMARY_PROMPT): P-C3.
+//   - Branch summaries are ported (P-C3: CollectEntriesForBranchSummary,
+//     SummarizeBranch), but the navigation that drives them — the RPC fork
+//     command, label attachment and the editor hand-back — is P-C4; this
+//     package stops at producing the summary text.
 package compact
