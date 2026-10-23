@@ -369,7 +369,14 @@ type AgentLoopConfig struct {
 // still part of run settlement: the agent becomes idle only after those
 // listeners finish.
 //
-// pi: packages/agent/src/types.ts:509-539.
+// The compaction pair (EvCompactionStart / EvCompactionEnd) is not an
+// agent-lifecycle event: pi emits it from the agent-session layer, which owns
+// compaction. This port's compaction orchestration lives above the agent
+// (cmd/ultrac), so these two exist here to ride the same union — and the same
+// PiJSONWriter — as the lifecycle events (plan D4).
+//
+// pi: packages/agent/src/types.ts:509-539 plus the session extensions in
+// core/agent-session.ts:196-237 that this port emits.
 type AgentEvent interface {
 	agentEventName() string
 }
@@ -442,6 +449,42 @@ type EvToolExecutionEnd struct {
 	DurationMS *int64
 }
 
+// Compaction reasons — pi's CompactionReason (agent-session.ts:209, 215).
+// "overflow" is reserved for the provider-reported context-overflow recovery
+// this port does not implement (plan D1): the value exists so a future
+// overflow path is additive, not a wire change.
+const (
+	CompactionReasonManual    = "manual"
+	CompactionReasonThreshold = "threshold"
+	CompactionReasonOverflow  = "overflow"
+)
+
+// EvCompactionStart opens a compaction. Emitted before the first summarization
+// call, whatever triggered it.
+//
+// pi: agent-session.ts:209 (the compaction_start member of AgentSessionEvent).
+type EvCompactionStart struct {
+	Reason string
+}
+
+// EvCompactionEnd closes a compaction. Result is the compaction outcome on
+// success and nil on failure; the harness owns its concrete shape (pi's
+// CompactionResult — summary / firstKeptEntryId / tokensBefore /
+// estimatedTokensAfter / usage / details), so the field stays untyped here:
+// this package must not import the layer that builds it. Aborted reports a
+// cancellation, in which case pi leaves errorMessage absent; WillRetry is
+// always false in this port (only pi's overflow path retries, and it is not
+// implemented — plan D1).
+//
+// pi: agent-session.ts:213-220.
+type EvCompactionEnd struct {
+	Reason       string
+	Result       any
+	Aborted      bool
+	WillRetry    bool
+	ErrorMessage string
+}
+
 func (EvAgentStart) agentEventName() string          { return "agent_start" }
 func (EvAgentEnd) agentEventName() string            { return "agent_end" }
 func (EvAgentSettled) agentEventName() string        { return "agent_settled" }
@@ -453,6 +496,8 @@ func (EvMessageEnd) agentEventName() string          { return "message_end" }
 func (EvToolExecutionStart) agentEventName() string  { return "tool_execution_start" }
 func (EvToolExecutionUpdate) agentEventName() string { return "tool_execution_update" }
 func (EvToolExecutionEnd) agentEventName() string    { return "tool_execution_end" }
+func (EvCompactionStart) agentEventName() string     { return "compaction_start" }
+func (EvCompactionEnd) agentEventName() string       { return "compaction_end" }
 
 // EventName returns the wire discriminant of ev.
 func EventName(ev AgentEvent) string { return ev.agentEventName() }

@@ -17,20 +17,24 @@ import (
 	"ultrac/internal/ai"
 )
 
-// TestAgentEventNames pins the 11 agent events in pi's union order.
+// TestAgentEventNames pins the 13 agent events in pi's union order.
 //
-// pi: packages/agent/src/types.ts:516-539.
+// pi: packages/agent/src/types.ts:516-539, plus the compaction pair from
+// core/agent-session.ts:209-220 (emitted above the agent in this port but
+// riding the same union — plan D4).
 func TestAgentEventNames(t *testing.T) {
 	events := []AgentEvent{
 		EvAgentStart{}, EvAgentEnd{}, EvAgentSettled{}, EvTurnStart{}, EvTurnEnd{},
 		EvMessageStart{}, EvMessageUpdate{}, EvMessageEnd{},
 		EvToolExecutionStart{}, EvToolExecutionUpdate{}, EvToolExecutionEnd{},
+		EvCompactionStart{}, EvCompactionEnd{},
 	}
 	want := []string{
 		"agent_start", "agent_end", "agent_settled",
 		"turn_start", "turn_end",
 		"message_start", "message_update", "message_end",
 		"tool_execution_start", "tool_execution_update", "tool_execution_end",
+		"compaction_start", "compaction_end",
 	}
 	if len(events) != len(want) {
 		t.Fatalf("got %d events, want %d", len(events), len(want))
@@ -39,6 +43,23 @@ func TestAgentEventNames(t *testing.T) {
 		if got := EventName(ev); got != want[i] {
 			t.Errorf("event %d: got %q, want %q", i, got, want[i])
 		}
+	}
+}
+
+// TestCompactionReasonLiterals pins the reason enum both compaction events
+// carry. "overflow" is reserved, not produced (plan D1).
+//
+// pi: agent-session.ts:209, 215.
+func TestCompactionReasonLiterals(t *testing.T) {
+	want := map[string]bool{CompactionReasonManual: true, CompactionReasonThreshold: true, CompactionReasonOverflow: true}
+	for _, got := range []string{CompactionReasonManual, CompactionReasonThreshold, CompactionReasonOverflow} {
+		if !want[got] {
+			t.Errorf("reason %q not in the pinned set", got)
+		}
+	}
+	if CompactionReasonManual != "manual" || CompactionReasonThreshold != "threshold" || CompactionReasonOverflow != "overflow" {
+		t.Errorf("reason literals drifted: %q/%q/%q",
+			CompactionReasonManual, CompactionReasonThreshold, CompactionReasonOverflow)
 	}
 }
 

@@ -506,6 +506,32 @@ func (a *Agent) Reset() error {
 	return nil
 }
 
+// ReplaceMessages swaps the transcript for a compaction projection, mid-run
+// or between runs (docs/compaction-branch-plan.md D2).
+//
+// Why this exists: the Agent's state.messages is the durable transcript the
+// loop snapshots per run, while the compaction entry lands in the session.
+// Replacing only the session would leave the next Prompt replaying the
+// uncompressed history — the authority split this method closes. The caller
+// supplies the complete replacement (the session's compaction-aware
+// projection, which already leads with the boundary system message when one
+// exists), so there is no baseline to preserve here: whatever the projection
+// carries is the new transcript, wholesale.
+//
+// The queues are deliberately untouched. Steering and follow-up messages are
+// drained by the loop through their own hooks (loopConfigLocked), never read
+// back from state.messages, so a compaction can never duplicate a queued
+// message — and one already delivered stays delivered, because it was
+// persisted to the session before the hook ran.
+//
+// Locking matches every other state mutation (a.mu); the copy keeps a caller
+// holding the old slice from observing later appends.
+func (a *Agent) ReplaceMessages(messages []ai.Message) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.state.messages = append([]ai.Message(nil), messages...)
+}
+
 // Prompt starts a new prompt run from one or more messages.
 //
 // Run-level failures (stream errors, aborts) are not returned here: they are
