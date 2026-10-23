@@ -251,6 +251,18 @@ func collectMessages(entries []session.ProjectedEntry) []ai.Message {
 	return out
 }
 
+// ProjectedTokens estimates the context size of a branch's compaction-aware
+// projection — the number the auto-compaction trigger compares against the
+// model's window.
+//
+// pi: _exceedsCompactionThreshold (agent-session.ts:766-774), which feeds
+// estimateProjectedContextTokens into shouldCompact. Exported because the
+// trigger lives above this package (cmd/ultrac's PrepareRequest hook) while
+// the usage-invalidation rule below must stay in one place.
+func ProjectedTokens(branch []*session.SessionEntry) int {
+	return estimateProjectedContextTokens(session.BuildProjection(branch), branch)
+}
+
 // estimateProjectedContextTokens estimates the planning-time context size.
 //
 // pi: estimateProjectedContextTokens (compaction.ts:226-262). The plain
