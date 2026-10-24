@@ -1036,6 +1036,43 @@ func TestAPIKeyUsesXApiKeyHeader(t *testing.T) {
 	}
 }
 
+// TestModelHeadersReachTheWire covers the models.json wiring: provider-
+// and model-level headers ride on the model entry, and this adapter has no
+// Config.Headers of its own — StreamWith merges them into the per-request
+// Options.Headers (model first, so a per-request header still wins per key),
+// which is the only path to the wire.
+func TestModelHeadersReachTheWire(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		fmt.Fprint(w, textStream("ok"))
+	}))
+	t.Cleanup(srv.Close)
+
+	model := testModel()
+	model.BaseURL = srv.URL
+	model.Headers = map[string]string{
+		"X-Custom":      "from-model",
+		"X-Both":        "from-model",
+		"Authorization": "Bearer model-token",
+	}
+	// No AuthToken on purpose: the model's own Authorization header is the
+	// credential, and post() must not overwrite it with an empty one.
+	drain(t, StreamWith(context.Background(), model, simpleTranscript("hi"), Options{
+		Headers: map[string]string{"X-Both": "from-request"},
+	}))
+
+	if got.Get("X-Custom") != "from-model" {
+		t.Errorf("X-Custom = %q, want the model-level header on the wire", got.Get("X-Custom"))
+	}
+	if got.Get("X-Both") != "from-request" {
+		t.Errorf("X-Both = %q, want the per-request header to win", got.Get("X-Both"))
+	}
+	if got.Get("Authorization") != "Bearer model-token" {
+		t.Errorf("authorization = %q, want the model-level header-owned credential", got.Get("Authorization"))
+	}
+}
+
 func TestThinkingRequestAddsBetaAndBudget(t *testing.T) {
 	var body []byte
 	client, srv := testClient(t, func(w http.ResponseWriter, r *http.Request) {

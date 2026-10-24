@@ -50,11 +50,19 @@ func Stream(ctx context.Context, model ai.Model, tc ai.TranscriptContext, opts a
 }
 
 // StreamWith is Stream with OpenAI-specific options.
+//
+// model.Headers rides along into the client's Config: they are the
+// provider- and model-level headers the merged catalog baked onto the
+// entry (models.json's headers fields), and Config.Headers is also where
+// a header-owned credential (Authorization) satisfies New's
+// "key or auth header" check. A per-request Options.Headers still wins,
+// because post() applies it after the client's headers.
 func StreamWith(ctx context.Context, model ai.Model, tc ai.TranscriptContext, opts Options) ai.Stream {
 	client, err := New(Config{
 		Model:      model,
 		APIKey:     opts.APIKey,
 		BaseURL:    firstNonEmpty(opts.BaseURL, model.BaseURL),
+		Headers:    model.Headers,
 		MaxRetries: opts.MaxRetries,
 		HTTPClient: opts.HTTPClient,
 		Logger:     opts.Logger,

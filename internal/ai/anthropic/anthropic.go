@@ -89,7 +89,25 @@ func Stream(ctx context.Context, model ai.Model, tc ai.TranscriptContext, opts a
 }
 
 // StreamWith is Stream with Anthropic-specific options.
+//
+// model.Headers — the provider- and model-level headers the merged
+// catalog baked onto the entry (models.json's headers fields) — are
+// merged into the per-request Options.Headers here, model headers first
+// so a per-request header still wins per key. Anthropic's client has no
+// Config.Headers of its own: Options.Headers is the only path to the
+// wire (post() applies it, and resolveBetas reads an anthropic-beta
+// override from it).
 func StreamWith(ctx context.Context, model ai.Model, tc ai.TranscriptContext, opts Options) ai.Stream {
+	if len(model.Headers) > 0 {
+		merged := make(map[string]string, len(model.Headers)+len(opts.Headers))
+		for name, value := range model.Headers {
+			merged[name] = value
+		}
+		for name, value := range opts.Headers {
+			merged[name] = value
+		}
+		opts.Headers = merged
+	}
 	client, err := New(Config{
 		Model:      model,
 		APIKey:     opts.APIKey,
