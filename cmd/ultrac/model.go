@@ -1,7 +1,8 @@
 package main
 
-// model.go — resolving the settings env block plus the --model flag into the
-// ai.Model the agent loop needs (P5).
+// model.go — resolving the settings env block, the merged models.json
+// catalog and the --model flag into the ai.Model the agent loop needs
+// (P5, P1).
 //
 // # Why this exists
 //
@@ -20,6 +21,7 @@ import (
 
 	"ultrac/internal/ai"
 	"ultrac/internal/config"
+	"ultrac/internal/models"
 )
 
 // resolveModel turns the flag and the settings env into a Model.
@@ -27,26 +29,44 @@ import (
 // Precedence, in order:
 //
 //  1. id: the --model flag (bare or "provider/id") beats ANTHROPIC_MODEL.
-//  2. provider: the flag's "provider/" part, else the catalog entry for the
-//     id, else the host of ANTHROPIC_BASE_URL, else "". With no signal at
-//     all, ai.WithDefaults infers the provider from the dialect — pi's
-//     models-store does the same, and for the anthropic default that means
-//     "anthropic", which is the honest label for a request aimed at an
-//     Anthropic-dialect endpoint we could not otherwise identify.
-//  3. api: the --api flag, else anthropic-messages. The default is not
-//     arbitrary: the settings block this reads is the ANTHROPIC_* family, and
-//     those variables name the Anthropic dialect by convention. A base URL
-//     pointing at a compatible endpoint (DeepSeek's /anthropic, a proxy)
-//     speaks the same dialect.
-//  4. baseUrl: ANTHROPIC_BASE_URL beats the catalog entry's, which beats the
-//     provider default (ai.WithDefaults' fallback chain).
+//  2. provider: the flag's "provider/" part, else the merged-catalog entry
+//     for the id, else the host of ANTHROPIC_BASE_URL, else "". With no
+//     signal at all, ai.WithDefaults infers the provider from the dialect
+//     — pi's models-store does the same, and for the anthropic default
+//     that means "anthropic", which is the honest label for a request
+//     aimed at an Anthropic-dialect endpoint we could not otherwise
+//     identify.
+//  3. api: the --api flag, else the ANTHROPIC_* convention, else the
+//     merged-catalog entry's own dialect. The three-way rule is §4.3 rule
+//     6 of the provider-config plan ("env 指定哪个 dialect 就用哪个")
+//     made precise: the anthropic default exists to interpret the
+//     settings block — ANTHROPIC_MODEL or ANTHROPIC_BASE_URL being set
+//     means that family is in play, and its dialect wins (the P5
+//     contract, byte for byte). With neither set nothing forces the
+//     dialect, so the entry's own api stands — a models.json declaration
+//     of "openai-completions" reaches the wire instead of being
+//     overwritten by the anthropic default and sent to the wrong
+//     endpoint. anthropic-messages remains the last resort for an id no
+//     entry describes; --api always wins over all of it.
+//  4. baseUrl: ANTHROPIC_BASE_URL beats the merged catalog's, which beats
+//     the provider default (ai.WithDefaults' fallback chain). "The merged
+//     catalog's" already encodes the models.json order: a provider-level
+//     baseUrl overrides the models[] entries of that provider, which
+//     override the built-in entry (merge.go rule 2).
 //
-// A catalog entry for (provider, id) is adopted wholesale for its cost rates,
-// context window and limits — but the resolved api dialect is forced back
-// onto it, because one provider can expose the same model under two dialects
-// at two URLs (DeepSeek's /anthropic vs /chat/completions) and the settings
-// block says which one is in play.
-func resolveModel(flagModel, flagAPI string, env map[string]string) (ai.Model, error) {
+// A merged-catalog entry for (provider, id) is adopted wholesale for its
+// cost rates, context window and limits — but the resolved api dialect is
+// forced back onto it, because one provider can expose the same model
+// under two dialects at two URLs (DeepSeek's /anthropic vs
+// /chat/completions) and the settings block says which one is in play.
+//
+// The snapshot is the merged view (built-in catalog + both models.json
+// layers); a nil snapshot means "no models.json", which is exactly
+// models.Build() with no configs.
+func resolveModel(snap *models.Snapshot, flagModel, flagAPI string, env map[string]string) (ai.Model, error) {
+	if snap == nil {
+		snap = models.Build()
+	}
 	providerName, id := splitModelFlag(flagModel)
 	if id == "" {
 		id = strings.TrimSpace(env[config.EnvModel])
@@ -61,21 +81,41 @@ func resolveModel(flagModel, flagAPI string, env map[string]string) (ai.Model, e
 		provider = ai.ProviderId(providerName)
 	}
 	if provider == "" {
-		if entry, ok := catalogEntryByID(id); ok {
+		if entry, ok := catalogEntryByID(snap, id); ok {
 			provider = entry.Provider
 		}
 	}
 	if provider == "" {
 		provider = providerFromBaseURL(env[config.EnvBaseURL])
 	}
+	// A provider whose models.json entry failed to compose must not
+	// resolve silently: the snapshot dropped its models, and the bare
+	// fallbacks below would produce a request that fails at the endpoint
+	// with a confusing error. pi fails at selection time too (the models
+	// store throws for a provider whose composition failed).
+	if provider != "" {
+		if err := snap.Problem(provider); err != nil {
+			return ai.Model{}, err
+		}
+	}
 
+	// The dialect decision, in precedence order (see the doc comment):
+	// an explicit --api flag, then the ANTHROPIC_* settings convention
+	// when that family is in play, then the entry's own api.
 	api := ai.APIAnthropicMessages
-	if flagAPI != "" {
+	entry, hasEntry := snap.Lookup(provider, id)
+	switch {
+	case flagAPI != "":
 		api = ai.Api(flagAPI)
+	case settingsSpeakAnthropic(env):
+		// The settings block names the model or the endpoint: its
+		// dialect is the one in play (P5).
+	case hasEntry && entry.API != "":
+		api = entry.API
 	}
 
 	m := ai.Model{ID: id, Provider: provider, API: api}
-	if entry, ok := ai.Lookup(provider, id); ok {
+	if hasEntry {
 		m = entry
 		m.API = api
 		if entry.API != api {
@@ -90,6 +130,16 @@ func resolveModel(flagModel, flagAPI string, env map[string]string) (ai.Model, e
 		m.BaseURL = base
 	}
 	return ai.WithDefaults(m), nil
+}
+
+// settingsSpeakAnthropic reports whether the ANTHROPIC_* settings family is
+// in play for this resolution: it names the model, or it names the
+// endpoint. Either one means the settings block is choosing in the
+// Anthropic dialect by convention (the api precedence in resolveModel,
+// rule 2).
+func settingsSpeakAnthropic(env map[string]string) bool {
+	return strings.TrimSpace(env[config.EnvModel]) != "" ||
+		strings.TrimSpace(env[config.EnvBaseURL]) != ""
 }
 
 // splitModelFlag parses pi's "provider/id" model syntax. A bare id returns
@@ -112,12 +162,12 @@ func splitModelFlag(flag string) (provider, id string) {
 	return "", flag
 }
 
-// catalogEntryByID finds the first catalog entry with this model id, whatever
-// its provider. It exists for the "user typed a model id, nothing else" case:
-// the entry names the provider and the dialect, which is the best guess
-// available.
-func catalogEntryByID(id string) (ai.Model, bool) {
-	for _, m := range ai.Catalog() {
+// catalogEntryByID finds the first merged-catalog entry with this model
+// id, whatever its provider. It exists for the "user typed a model id,
+// nothing else" case: the entry names the provider and the dialect, which
+// is the best guess available.
+func catalogEntryByID(snap *models.Snapshot, id string) (ai.Model, bool) {
+	for _, m := range snap.Catalog() {
 		if m.ID == id {
 			return m, true
 		}

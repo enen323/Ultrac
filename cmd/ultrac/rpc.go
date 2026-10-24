@@ -184,7 +184,7 @@ func (host *rpcHost) ResumeSession(path string) error {
 	}
 	seed := mgr.BuildSessionContext()
 	if seed.Model != nil {
-		if m, err := resolveModel(seed.Model.Provider+"/"+seed.Model.ModelID, host.h.flags.API, host.h.effective); err == nil &&
+		if m, err := resolveModel(host.h.snapshot, seed.Model.Provider+"/"+seed.Model.ModelID, host.h.flags.API, host.h.effective); err == nil &&
 			containsModel(host.h.availableModels(), m) {
 			host.h.model = m
 		}

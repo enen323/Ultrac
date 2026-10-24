@@ -18,8 +18,9 @@
 //     run must not leak credentials into a subprocess it spawns).
 //   - Session: opened before the model, because a resumed session can
 //     supply the model when neither flag nor settings name one.
-//   - Model: resolveModel's fallback chain (flag → settings → catalog →
-//     base-URL host → provider default).
+//   - Model: resolveModel's fallback chain (flag → settings → merged
+//     catalog [built-in + models.json layers] → base-URL host → provider
+//     default).
 //   - Prompt: the sections are rebuilt per prompt, exactly as pi
 //     recomputes them in _preparePromptAndToolLoadout
 //     (agent-session.ts:1742-1754) — a context file edited mid-session
@@ -39,6 +40,7 @@ import (
 	"ultrac/internal/compact"
 	"ultrac/internal/config"
 	"ultrac/internal/logging"
+	"ultrac/internal/models"
 	"ultrac/internal/prompt"
 	"ultrac/internal/rpc"
 	"ultrac/internal/session"
@@ -64,6 +66,11 @@ type harness struct {
 	// (set_auto_compaction) through the same read-modify-write cycle the
 	// startup resolution used.
 	resolver *config.FileResolver
+	// snapshot is the merged model catalog (built-in + both models.json
+	// layers). Every model resolution and every availableModels list goes
+	// through it, so a models.json entry is visible everywhere the
+	// handwritten catalog used to be the only source.
+	snapshot *models.Snapshot
 	// compaction is the resolved compaction configuration (settings
 	// section + engine defaults). newAgent hands it to every compactor it
 	// builds.
@@ -110,6 +117,18 @@ func buildHarness(f *agentFlags, cwd string, stderr io.Writer, streamFn agent.St
 	}
 	effective := config.EffectiveEnv(layers)
 
+	// -- 1b. models.json layers ------------------------------------------
+	//
+	// The two models.json files merge over the built-in catalog. A load
+	// failure degrades to a warning (pi: model-config.ts catches per file
+	// and continues); per-provider composition problems are reported the
+	// same way here and become hard errors only when a run selects the
+	// broken provider (resolveModel checks).
+	snapshot := loadModelSnapshot(cwd, stderr)
+	for _, p := range snapshot.Problems() {
+		fmt.Fprintf(stderr, "warning: %v\n", p)
+	}
+
 	// The compaction section resolves the same way: merge the layers, then
 	// inject the engine defaults for absent keys (plan D6). The defaults
 	// never enter a file — Get() reports what the files actually say.
@@ -137,7 +156,7 @@ func buildHarness(f *agentFlags, cwd string, stderr io.Writer, streamFn agent.St
 		// like a user-typed value.
 		flagModel = seed.Model.Provider + "/" + seed.Model.ModelID
 	}
-	model, err := resolveModel(flagModel, f.API, effective)
+	model, err := resolveModel(snapshot, flagModel, f.API, effective)
 	if err != nil {
 		fmt.Fprintf(stderr, "ultrac: %v\n", err)
 		return nil, 2
@@ -165,6 +184,7 @@ func buildHarness(f *agentFlags, cwd string, stderr io.Writer, streamFn agent.St
 		apiKey:     apiKey,
 		effective:  effective,
 		resolver:   r,
+		snapshot:   snapshot,
 		compaction: compaction,
 		streamFn:   streamFn,
 	}, 0
@@ -300,15 +320,19 @@ func (h *harness) buildPrompt(a *agent.Agent, text string, images []rpc.ImageCon
 	return rpc.PromptInput{Patch: patchMsg, User: userMessageWith(text, images)}, nil
 }
 
-// availableModels lists the models set_model accepts: the handwritten
-// catalog plus the settings-resolved model when it is not already in it.
+// availableModels lists the models set_model accepts: the merged catalog
+// (built-in plus both models.json layers) plus the settings-resolved model
+// when it is not already in it.
 //
 // pi's model runtime snapshot works the same way (rpc-mode.ts:471,
 // getAvailableSnapshot) — a model the settings name is selectable even
 // when the catalog has not caught up with the provider's lineup.
 func (h *harness) availableModels() []ai.Model {
 	out := ai.Catalog()
-	if m, err := resolveModel("", "", h.effective); err == nil && !containsModel(out, m) {
+	if h.snapshot != nil {
+		out = h.snapshot.Catalog()
+	}
+	if m, err := resolveModel(h.snapshot, "", "", h.effective); err == nil && !containsModel(out, m) {
 		out = append(out, m)
 	}
 	return out

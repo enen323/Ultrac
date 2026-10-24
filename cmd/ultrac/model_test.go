@@ -7,9 +7,11 @@ package main
 // provider, and a flag that carries only half the identity.
 
 import (
+	"strings"
 	"testing"
 
 	"ultrac/internal/ai"
+	"ultrac/internal/models"
 )
 
 func envOf(kv map[string]string) map[string]string { return kv }
@@ -22,7 +24,7 @@ func TestResolveModelFromSettings(t *testing.T) {
 		"ANTHROPIC_AUTH_TOKEN": "sk-test",
 		"ANTHROPIC_MODEL":      "deepseek-flash",
 	})
-	m, err := resolveModel("", "", env)
+	m, err := resolveModel(nil, "", "", env)
 	if err != nil {
 		t.Fatalf("resolveModel: %v", err)
 	}
@@ -48,7 +50,7 @@ func TestResolveModelFlagBeatsSettings(t *testing.T) {
 		"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
 		"ANTHROPIC_MODEL":    "deepseek-flash",
 	})
-	m, err := resolveModel("deepseek/deepseek-chat", "", env)
+	m, err := resolveModel(nil, "deepseek/deepseek-chat", "", env)
 	if err != nil {
 		t.Fatalf("resolveModel: %v", err)
 	}
@@ -71,25 +73,126 @@ func TestResolveModelFlagBeatsSettings(t *testing.T) {
 
 func TestResolveModelBareFlagUsesCatalogDialect(t *testing.T) {
 	// A bare model id with no settings at all: the catalog entry is the only
-	// signal, and its dialect must survive when the env convention is absent.
-	m, err := resolveModel("deepseek-chat", "", nil)
+	// signal, and its dialect survives — with no ANTHROPIC_* family in play
+	// there is nothing to force the anthropic default (api precedence rule
+	// 3, provider-config-plan.md §4.3 rule 6). The entry's own dialect and
+	// its own base URL are what reach the wire.
+	m, err := resolveModel(nil, "deepseek-chat", "", nil)
 	if err != nil {
 		t.Fatalf("resolveModel: %v", err)
 	}
-	// resolveModel forces the anthropic dialect (settings convention); the
-	// base URL then comes from the anthropic-dialect entry of the same
-	// provider, not from the openai one.
-	if m.API != ai.APIAnthropicMessages {
-		t.Errorf("api = %q, want anthropic-messages", m.API)
+	if m.API != ai.APIOpenAICompletions {
+		t.Errorf("api = %q, want the catalog entry's dialect (openai-completions)", m.API)
 	}
-	if m.BaseURL != "https://api.deepseek.com/anthropic" {
-		t.Errorf("baseUrl = %q, want the anthropic-dialect entry URL", m.BaseURL)
+	if m.BaseURL != "https://api.deepseek.com" {
+		t.Errorf("baseUrl = %q, want the openai-dialect entry URL", m.BaseURL)
+	}
+	// The settings convention still forces the dialect when it is in play:
+	// the same bare flag with ANTHROPIC_BASE_URL set resolves to the
+	// anthropic-dialect entry (P5 contract, unchanged).
+	env := envOf(map[string]string{"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic"})
+	m2, err := resolveModel(nil, "deepseek-chat", "", env)
+	if err != nil {
+		t.Fatalf("resolveModel: %v", err)
+	}
+	if m2.API != ai.APIAnthropicMessages {
+		t.Errorf("api = %q, want anthropic-messages under the settings convention", m2.API)
+	}
+	if m2.BaseURL != "https://api.deepseek.com/anthropic" {
+		t.Errorf("baseUrl = %q, want the settings URL", m2.BaseURL)
+	}
+}
+
+// TestResolveModelUsesMergedCatalog — a models.json provider resolves like
+// a built-in one: the merged snapshot carries the entry, and the
+// provider/id flag finds it with its declared dialect, base URL and rates.
+func TestResolveModelUsesMergedCatalog(t *testing.T) {
+	snap := models.Build(models.Config{Providers: map[string]models.ProviderConfig{
+		"my-proxy": {
+			BaseURL: "https://proxy.internal.example.com/v1",
+			API:     "openai-completions",
+			Models: []models.ModelDefinition{{
+				ID:   "my-model",
+				Name: "My Model",
+				Cost: &models.ModelCost{Input: 1.5, Output: 3.0, CacheRead: 0.15, CacheWrite: 1.5},
+			}},
+		},
+	}})
+	// No ANTHROPIC_* settings in play: the entry's declared dialect is the
+	// one that resolves — the "直接可用" shape from the plan's goal.
+	m, err := resolveModel(snap, "my-proxy/my-model", "", nil)
+	if err != nil {
+		t.Fatalf("resolveModel: %v", err)
+	}
+	if m.Provider != ai.ProviderId("my-proxy") {
+		t.Errorf("provider = %q, want my-proxy", m.Provider)
+	}
+	if m.API != ai.APIOpenAICompletions {
+		t.Errorf("api = %q, want the models.json entry's dialect", m.API)
+	}
+	if m.BaseURL != "https://proxy.internal.example.com/v1" {
+		t.Errorf("baseUrl = %q, want the provider entry's", m.BaseURL)
+	}
+	if m.Name != "My Model" {
+		t.Errorf("name = %q, want My Model", m.Name)
+	}
+	if m.Cost.Input != 1.5 || m.Cost.Output != 3.0 {
+		t.Errorf("cost = %+v, want the models.json rates", m.Cost)
+	}
+	// env still wins over models.json (the documented precedence).
+	env := envOf(map[string]string{"ANTHROPIC_BASE_URL": "https://env.example.com/v1"})
+	m2, err := resolveModel(snap, "my-proxy/my-model", "", env)
+	if err != nil {
+		t.Fatalf("resolveModel: %v", err)
+	}
+	if m2.BaseURL != "https://env.example.com/v1" {
+		t.Errorf("baseUrl = %q, want the env URL to win", m2.BaseURL)
+	}
+}
+
+// TestResolveModelReportsBrokenProvider — an empty provider entry fails to
+// compose (merge.go's pi rule). The snapshot keeps serving every other
+// provider, but selecting the broken one is a hard error rather than a
+// request that fails at the endpoint with a confusing message.
+func TestResolveModelReportsBrokenProvider(t *testing.T) {
+	snap := models.Build(models.Config{Providers: map[string]models.ProviderConfig{
+		"broken": {},
+	}})
+	_, err := resolveModel(snap, "broken/whatever", "", nil)
+	if err == nil {
+		t.Fatal("selecting a provider whose entry failed to compose must error")
+	}
+	if !strings.Contains(err.Error(), "broken") {
+		t.Errorf("error = %v, want it to name the broken provider", err)
+	}
+	// An unrelated provider is unaffected.
+	if _, err := resolveModel(snap, "deepseek/deepseek-chat", "", nil); err != nil {
+		t.Errorf("an unrelated provider must still resolve: %v", err)
+	}
+}
+
+// TestResolveModelNilSnapshotMeansBuiltin — a nil snapshot means "no
+// models.json loaded": the built-in catalog alone, exactly models.Build()
+// with no configs.
+func TestResolveModelNilSnapshotMeansBuiltin(t *testing.T) {
+	fromNil, err := resolveModel(nil, "deepseek/deepseek-chat", "", nil)
+	if err != nil {
+		t.Fatalf("resolveModel(nil): %v", err)
+	}
+	fromBuiltin, err := resolveModel(models.Build(), "deepseek/deepseek-chat", "", nil)
+	if err != nil {
+		t.Fatalf("resolveModel(Build()): %v", err)
+	}
+	if fromNil.ID != fromBuiltin.ID || fromNil.Provider != fromBuiltin.Provider ||
+		fromNil.API != fromBuiltin.API || fromNil.BaseURL != fromBuiltin.BaseURL ||
+		fromNil.Cost.Input != fromBuiltin.Cost.Input || fromNil.ContextWindow != fromBuiltin.ContextWindow {
+		t.Errorf("nil snapshot = %+v, want the built-in view %+v", fromNil, fromBuiltin)
 	}
 }
 
 func TestResolveModelAPIOverride(t *testing.T) {
 	env := envOf(map[string]string{"ANTHROPIC_MODEL": "deepseek-chat"})
-	m, err := resolveModel("", "openai-completions", env)
+	m, err := resolveModel(nil, "", "openai-completions", env)
 	if err != nil {
 		t.Fatalf("resolveModel: %v", err)
 	}
@@ -110,7 +213,7 @@ func TestResolveModelUnknownHostKeepsWorking(t *testing.T) {
 		"ANTHROPIC_BASE_URL": "https://llm.internal.example.com/v1",
 		"ANTHROPIC_MODEL":    "some-model",
 	})
-	m, err := resolveModel("", "", env)
+	m, err := resolveModel(nil, "", "", env)
 	if err != nil {
 		t.Fatalf("resolveModel: %v", err)
 	}
@@ -129,12 +232,12 @@ func TestResolveModelUnknownHostKeepsWorking(t *testing.T) {
 }
 
 func TestResolveModelNoModelIsError(t *testing.T) {
-	if _, err := resolveModel("", "", nil); err == nil {
+	if _, err := resolveModel(nil, "", "", nil); err == nil {
 		t.Fatal("expected an error when no model is configured anywhere")
 	}
 	// A provider-only flag still falls back to the settings model id, but
 	// there is none here, so it is still an error.
-	if _, err := resolveModel("deepseek/", "", nil); err == nil {
+	if _, err := resolveModel(nil, "deepseek/", "", nil); err == nil {
 		t.Fatal("expected an error for a provider-only flag with no settings model")
 	}
 }
@@ -142,7 +245,7 @@ func TestResolveModelNoModelIsError(t *testing.T) {
 func TestResolveModelColonSuffixStripped(t *testing.T) {
 	// pi's "provider/model:thinking" syntax: this port has no thinking flag,
 	// so the suffix must not leak into the model id.
-	m, err := resolveModel("deepseek/deepseek-chat:high", "", nil)
+	m, err := resolveModel(nil, "deepseek/deepseek-chat:high", "", nil)
 	if err != nil {
 		t.Fatalf("resolveModel: %v", err)
 	}

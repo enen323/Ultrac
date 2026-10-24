@@ -117,7 +117,7 @@ func TestAvailableModelsIncludeSettingsModel(t *testing.T) {
 	// The settings-resolved model must be selectable even when the
 	// handwritten catalog has not caught up (pi's model runtime snapshot
 	// works the same way, rpc-mode.ts:471).
-	resolved, err := resolveModel("", "", h.effective)
+	resolved, err := resolveModel(h.snapshot, "", "", h.effective)
 	if err != nil {
 		t.Fatalf("resolveModel: %v", err)
 	}
