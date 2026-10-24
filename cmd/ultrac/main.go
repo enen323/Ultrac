@@ -193,6 +193,12 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	// The provider-config files (P4): where models.json and auth.json
+	// live, what the user's providers declare, and where each one's
+	// credential comes from — the question "why did my key not work" is
+	// answered here or nowhere.
+	printProviderConfigSection(stdout, stderr, cwd)
+
 	if loadErr != nil {
 		fmt.Fprintf(stderr, "\nwarning: %v\n", loadErr)
 	}
