@@ -21,6 +21,10 @@
 //   - Model: resolveModel's fallback chain (flag → settings → merged
 //     catalog [built-in + models.json layers] → base-URL host → provider
 //     default).
+//   - Credential: the per-provider chain (models.json apiKey → auth.json,
+//     P3) with the settings env block's token as the last-resort
+//     fallback; the startup fail-fast names the provider when neither
+//     source has a key for it.
 //   - Prompt: the sections are rebuilt per prompt, exactly as pi
 //     recomputes them in _preparePromptAndToolLoadout
 //     (agent-session.ts:1742-1754) — a context file edited mid-session
@@ -59,8 +63,17 @@ type harness struct {
 	seed      session.SessionContext
 	model     ai.Model
 	tools     []agent.Tool
-	apiKey    string
 	effective map[string]string
+
+	// credential resolves the API key for one provider. It is the
+	// per-provider chain (models.json apiKey → auth.json, plan §4.6)
+	// with the settings env block's token as the last-resort fallback —
+	// the chain itself never reads env (D6); the env block reaches the
+	// wire through its own pre-P3 path, which the fallback preserves.
+	// Every consumer goes through it with the CURRENT model's provider:
+	// the agent loop (GetAPIKey), the compactor's summary request, and
+	// the startup fail-fast.
+	credential func(provider string) string
 
 	// resolver is kept so the RPC layer can persist settings changes
 	// (set_auto_compaction) through the same read-modify-write cycle the
@@ -162,12 +175,30 @@ func buildHarness(f *agentFlags, cwd string, stderr io.Writer, streamFn agent.St
 		return nil, 2
 	}
 
-	apiKey := apiKeyFor(effective)
-	if apiKey == "" {
-		fmt.Fprintln(stderr, "ultrac: no credential is configured.")
-		fmt.Fprintln(stderr, "        Put ANTHROPIC_AUTH_TOKEN (or ANTHROPIC_API_KEY) in the \"env\" block of")
-		fmt.Fprintf(stderr, "        %s.\n", filepath.Join(config.ConfigHome(), "settings.json"))
-		fmt.Fprintln(stderr, "        Run `ultrac config` to see what the layers currently resolve to.")
+	// -- 3b. Credential chain (P3) ------------------------------------------
+	//
+	// auth.json merges the same two layers models.json does (authfile.go).
+	// File-level failures degrade to warnings inside loadAuthStack;
+	// per-provider problems (an oauth block, a malformed entry) are
+	// reported here and cost that provider its credential, nothing else.
+	authStack := loadAuthStack(cwd, stderr)
+	for _, p := range authStack.Problems() {
+		fmt.Fprintf(stderr, "warning: %v\n", p)
+	}
+	// The chain first, the settings env block's token second. The order
+	// is the whole story of P3: a per-provider credential always beats
+	// the one-token-for-everything env fallback, and a provider with
+	// neither still authenticates the way it did before the chain
+	// existed (D6).
+	envToken := settingsEnvToken(effective)
+	credential := func(provider string) string {
+		if key := resolveCredential(snapshot, authStack, provider); key != "" {
+			return key
+		}
+		return envToken
+	}
+	if credential(string(model.Provider)) == "" {
+		noCredentialGuidance(stderr, string(model.Provider))
 		return nil, 1
 	}
 
@@ -181,13 +212,34 @@ func buildHarness(f *agentFlags, cwd string, stderr io.Writer, streamFn agent.St
 		seed:       seed,
 		model:      model,
 		tools:      tools,
-		apiKey:     apiKey,
+		credential: credential,
 		effective:  effective,
 		resolver:   r,
 		snapshot:   snapshot,
 		compaction: compaction,
 		streamFn:   streamFn,
 	}, 0
+}
+
+// noCredentialGuidance is the startup fail-fast for a model whose
+// provider resolves to no credential anywhere (plan §4.6). It keeps the
+// old "no credential is configured" wording — tests and users know it —
+// and upgrades the body to per-provider guidance: the provider is named,
+// and the two files the chain reads come first, with the settings env
+// block mentioned last as the legacy fallback it now is.
+func noCredentialGuidance(w io.Writer, provider string) {
+	if provider != "" {
+		fmt.Fprintf(w, "ultrac: no credential is configured for provider %q.\n", provider)
+	} else {
+		fmt.Fprintln(w, "ultrac: no credential is configured.")
+	}
+	fmt.Fprintf(w, "        Put the key in %s:\n", filepath.Join(config.ConfigHome(), "auth.json"))
+	fmt.Fprintf(w, "          {\"%s\": {\"type\": \"api_key\", \"key\": \"sk-...\"}}\n", provider)
+	fmt.Fprintln(w, "        or in that provider's \"apiKey\" field in models.json")
+	fmt.Fprintln(w, "        (<ConfigHome>/models.json or <cwd>/.ultrac/models.json).")
+	fmt.Fprintln(w, "        ANTHROPIC_AUTH_TOKEN in the settings \"env\" block remains a")
+	fmt.Fprintln(w, "        last-resort fallback.")
+	fmt.Fprintln(w, "        Run `ultrac config` to see what the layers currently resolve to.")
 }
 
 // openSessionFor creates a session or resumes the most recent one for the
@@ -271,10 +323,14 @@ func (h *harness) newAgent(mgr *session.SessionManager, seed session.SessionCont
 			initial.ThinkingLevel = &level
 		}
 	}
-	compactor := newCompactor(mgr, h.compaction, h.apiKey, h.streamFn, h.emitEvent)
+	compactor := newCompactor(mgr, h.compaction, h.credential, h.streamFn, h.emitEvent)
 	a := agent.NewAgent(agent.AgentOptions{
-		InitialState:   initial,
-		GetAPIKey:      func(string) string { return h.apiKey },
+		InitialState: initial,
+		// The provider parameter is real now (P3): the loop resolves the
+		// credential per request with the CURRENT model's provider, so a
+		// set_model or a resume to another provider authenticates with
+		// that provider's chain entry.
+		GetAPIKey:      h.credential,
 		SessionID:      mgr.SessionID(),
 		StreamFn:       h.streamFn,
 		PrepareRequest: compactor.prepareRequest,

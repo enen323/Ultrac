@@ -100,8 +100,11 @@ func TestPrintWithModelsJSONProviderEndToEnd(t *testing.T) {
 		t.Errorf("stdout = %q, want the fake endpoint's answer", stdout.String())
 	}
 	// The settings-env credential reached the wire as the provider's
-	// Bearer token. (P1 still resolves it through the env block; the
-	// per-provider credential chain lands in P3.)
+	// Bearer token. my-proxy declares no apiKey and has no auth.json
+	// entry, so this is the chain's last-resort fallback — the pre-P3
+	// path kept working unchanged (D6). The chain itself (auth.json's
+	// literal key, no env token anywhere) is covered by
+	// auth_e2e_test.go.
 	if gotAuth != "Bearer sk-fake-proxy-key" {
 		t.Errorf("authorization = %q, want the settings token", gotAuth)
 	}

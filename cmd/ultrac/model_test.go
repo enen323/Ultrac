@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"ultrac/internal/ai"
+	"ultrac/internal/config/auth"
 	"ultrac/internal/models"
 )
 
@@ -293,20 +294,81 @@ func TestProviderFromBaseURL(t *testing.T) {
 	}
 }
 
-func TestAPIKeyFor(t *testing.T) {
-	// Auth token wins over API key — the precedence the Anthropic SDK
-	// documents and the old CLI used.
+// TestResolveCredential — the per-provider credential chain (plan §4.6,
+// P3): models.json's apiKey first, auth.json's api_key second, nothing
+// third. The env block is deliberately not a step of the chain (D6); it
+// rides outside as the harness's last-resort fallback (settingsEnvToken),
+// which the harness tests cover.
+func TestResolveCredential(t *testing.T) {
+	snap := models.Build(models.Config{Providers: map[string]models.ProviderConfig{
+		"from-models": {
+			BaseURL: "https://a.example.com/v1",
+			API:     "openai-completions",
+			APIKey:  "sk-models",
+			Models: []models.ModelDefinition{{
+				ID:   "m1",
+				Cost: &models.ModelCost{Input: 1, Output: 2, CacheRead: 0.1, CacheWrite: 1},
+			}},
+		},
+		"both": {
+			BaseURL: "https://b.example.com/v1",
+			API:     "openai-completions",
+			APIKey:  "sk-models-wins",
+			Models: []models.ModelDefinition{{
+				ID:   "m2",
+				Cost: &models.ModelCost{Input: 1, Output: 2, CacheRead: 0.1, CacheWrite: 1},
+			}},
+		},
+	}})
+	stack := auth.Build(auth.File{Entries: map[string]auth.Entry{
+		"from-auth": {Type: auth.EntryTypeAPIKey, Key: "sk-auth"},
+		"both":      {Type: auth.EntryTypeAPIKey, Key: "sk-auth-loses"},
+	}})
+
+	cases := []struct {
+		provider string
+		want     string
+	}{
+		// Step 1: models.json's apiKey.
+		{"from-models", "sk-models"},
+		// Step 2: auth.json's entry.
+		{"from-auth", "sk-auth"},
+		// Both declare one: models.json wins (the chain's order).
+		{"both", "sk-models-wins"},
+		// A built-in provider with nothing stored: no credential.
+		{"deepseek", ""},
+		// An unknown provider: no credential, not an error.
+		{"nobody", ""},
+	}
+	for _, tc := range cases {
+		if got := resolveCredential(snap, stack, tc.provider); got != tc.want {
+			t.Errorf("resolveCredential(%q) = %q, want %q", tc.provider, got, tc.want)
+		}
+	}
+
+	// Nil views mean "no files", the normal case: the chain resolves to
+	// nothing rather than panicking.
+	if got := resolveCredential(nil, nil, "from-models"); got != "" {
+		t.Errorf("resolveCredential(nil, nil) = %q, want empty", got)
+	}
+}
+
+// TestSettingsEnvToken — the settings env block's credential, kept as the
+// harness's last-resort fallback (D6: that path is unaffected by the
+// chain). Auth token wins over API key — the precedence the Anthropic SDK
+// documents and the old CLI used.
+func TestSettingsEnvToken(t *testing.T) {
 	env := envOf(map[string]string{
 		"ANTHROPIC_API_KEY":    "sk-key",
 		"ANTHROPIC_AUTH_TOKEN": "sk-token",
 	})
-	if got := apiKeyFor(env); got != "sk-token" {
-		t.Errorf("apiKeyFor = %q, want sk-token", got)
+	if got := settingsEnvToken(env); got != "sk-token" {
+		t.Errorf("settingsEnvToken = %q, want sk-token", got)
 	}
-	if got := apiKeyFor(envOf(map[string]string{"ANTHROPIC_API_KEY": "sk-key"})); got != "sk-key" {
-		t.Errorf("apiKeyFor = %q, want sk-key", got)
+	if got := settingsEnvToken(envOf(map[string]string{"ANTHROPIC_API_KEY": "sk-key"})); got != "sk-key" {
+		t.Errorf("settingsEnvToken = %q, want sk-key", got)
 	}
-	if got := apiKeyFor(nil); got != "" {
-		t.Errorf("apiKeyFor = %q, want empty", got)
+	if got := settingsEnvToken(nil); got != "" {
+		t.Errorf("settingsEnvToken = %q, want empty", got)
 	}
 }

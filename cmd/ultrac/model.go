@@ -2,7 +2,8 @@ package main
 
 // model.go — resolving the settings env block, the merged models.json
 // catalog and the --model flag into the ai.Model the agent loop needs
-// (P5, P1).
+// (P5, P1), plus the per-provider credential chain that authenticates
+// the resolved model (P3).
 //
 // # Why this exists
 //
@@ -21,6 +22,7 @@ import (
 
 	"ultrac/internal/ai"
 	"ultrac/internal/config"
+	"ultrac/internal/config/auth"
 	"ultrac/internal/models"
 )
 
@@ -224,10 +226,39 @@ func providerFromBaseURL(base string) ai.ProviderId {
 	return ""
 }
 
-// apiKeyFor picks the credential the way the provider clients expect:
-// ANTHROPIC_AUTH_TOKEN wins over ANTHROPIC_API_KEY (the same precedence the
-// old CLI used, and the one the Anthropic SDK documents).
-func apiKeyFor(env map[string]string) string {
+// resolveCredential is the per-provider credential chain (plan §4.6):
+// models.json's apiKey first, auth.json's api_key entry second, nothing
+// third. It deliberately never reads env (D6) — the settings env block's
+// token rides OUTSIDE the chain as the harness's last-resort fallback
+// (settingsEnvToken), which is what keeps the pre-P3 path working
+// unchanged.
+//
+// Both inputs are the merged views the CLI built: the snapshot carries the
+// winning models.json entry per provider (project over user, D1), the
+// stack the merged auth.json layers. Either may be nil — "no such file"
+// is the normal case, not an error.
+func resolveCredential(snap *models.Snapshot, stack *auth.Stack, provider string) string {
+	if snap != nil {
+		if cfg, ok := snap.ProviderConfig(ai.ProviderId(provider)); ok && cfg.APIKey != "" {
+			return cfg.APIKey
+		}
+	}
+	if stack != nil {
+		return stack.APIKey(provider)
+	}
+	return ""
+}
+
+// settingsEnvToken is the settings env block's credential:
+// ANTHROPIC_AUTH_TOKEN wins over ANTHROPIC_API_KEY (the precedence the
+// Anthropic SDK documents and the old CLI used).
+//
+// It is NOT a step of the credential chain — the chain never reads env
+// (§4.6). This is the pre-P3 path, preserved verbatim as the harness's
+// last resort: a provider with no models.json apiKey and no auth.json
+// entry still authenticates the way it did before the chain existed (D6:
+// the settings env block's path to StreamOptions.APIKey is unaffected).
+func settingsEnvToken(env map[string]string) string {
 	if k := strings.TrimSpace(env[config.EnvAuthToken]); k != "" {
 		return k
 	}

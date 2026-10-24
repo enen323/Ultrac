@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,6 +124,95 @@ func TestAvailableModelsIncludeSettingsModel(t *testing.T) {
 	}
 	if !containsModel(models, resolved) {
 		t.Errorf("settings model %s/%s missing from %d entries", resolved.Provider, resolved.ID, len(models))
+	}
+}
+
+// TestHarnessCredentialResolvesPerProvider — P3's wiring at the harness
+// level: the credential resolver the agent loop calls per request uses
+// the provider parameter. models.json's apiKey is step one, auth.json is
+// step two, and a provider with neither still gets the settings env
+// token — the pre-P3 path, preserved as the last-resort fallback (D6).
+// The chain always beats the env token: from-models resolves to its own
+// key even though the settings block carries one.
+func TestHarnessCredentialResolvesPerProvider(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("ULTRAC_CONFIG_DIR", home)
+
+	writeFile(t, filepath.Join(home, "settings.json"), `{"env": {
+		"ANTHROPIC_AUTH_TOKEN": "sk-env-token",
+		"ANTHROPIC_MODEL": "deepseek-chat"
+	}}`)
+	writeFile(t, filepath.Join(home, "models.json"), `{
+		"providers": {
+			"from-models": {
+				"baseUrl": "https://a.example.com/v1",
+				"api": "openai-completions",
+				"apiKey": "sk-models",
+				"models": [
+					{"id": "m1", "cost": {"input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 1}}
+				]
+			}
+		}
+	}`)
+	writeFile(t, filepath.Join(home, "auth.json"), `{
+		"from-auth": {"type": "api_key", "key": "sk-auth"}
+	}`)
+
+	h, code := buildHarness(&agentFlags{Mode: "text"}, cwd, io.Discard, nil)
+	if code != 0 {
+		t.Fatalf("buildHarness exit = %d, want 0", code)
+	}
+	if h.credential == nil {
+		t.Fatal("the harness must carry a credential resolver (P3)")
+	}
+	if got := h.credential("from-models"); got != "sk-models" {
+		t.Errorf("credential(from-models) = %q, want the models.json key", got)
+	}
+	if got := h.credential("from-auth"); got != "sk-auth" {
+		t.Errorf("credential(from-auth) = %q, want the auth.json key", got)
+	}
+	if got := h.credential("deepseek"); got != "sk-env-token" {
+		t.Errorf("credential(deepseek) = %q, want the settings env token (the unaffected path)", got)
+	}
+	if got := h.credential("nobody"); got != "sk-env-token" {
+		t.Errorf("credential(nobody) = %q, want the settings env token", got)
+	}
+	// The startup model resolved through the same resolver, so the
+	// fail-fast below could not have fired with these files present.
+	if got := h.credential(string(h.model.Provider)); got == "" {
+		t.Error("the startup model's provider must resolve to a credential")
+	}
+}
+
+// TestBuildHarnessFailsFastPerProvider — the P3 startup check: a model
+// whose provider has no credential anywhere exits 1 with guidance that
+// names the provider and points at the files the chain reads. The old
+// "no credential is configured" wording stays as the lead (print_test's
+// TestPrintNoCredential asserts on it); the body is the per-provider
+// upgrade the plan asks for.
+func TestBuildHarnessFailsFastPerProvider(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("ULTRAC_CONFIG_DIR", home)
+	// No env token, no models.json, no auth.json: the settings block
+	// names the model and nothing else.
+	writeFile(t, filepath.Join(home, "settings.json"), `{"env": {"ANTHROPIC_MODEL": "deepseek-chat"}}`)
+
+	var stderr strings.Builder
+	h, code := buildHarness(&agentFlags{Mode: "text"}, cwd, &stderr, nil)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (no credential anywhere)", code)
+	}
+	if h != nil {
+		t.Error("no harness should be returned on the credential fail-fast")
+	}
+	msg := stderr.String()
+	if !strings.Contains(msg, `no credential is configured for provider "deepseek"`) {
+		t.Errorf("stderr = %q, want the per-provider wording", msg)
+	}
+	if !strings.Contains(msg, "auth.json") {
+		t.Errorf("stderr = %q, want the auth.json guidance", msg)
 	}
 }
 

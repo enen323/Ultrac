@@ -68,8 +68,14 @@ type compactor struct {
 	mgr      *session.SessionManager
 	settings compact.Settings
 
-	apiKey   string
-	streamFn agent.StreamFn // nil means the provider registry
+	// credential resolves the API key for the summary request. It is the
+	// harness's per-provider resolver (assemble.go), called with the
+	// CURRENT model's provider at execution time rather than captured as
+	// a string: a set_model or a resume can change the model under a
+	// live compactor, and the summary must authenticate as that model's
+	// provider (P3).
+	credential func(provider string) string
+	streamFn   agent.StreamFn // nil means the provider registry
 
 	// emit puts compaction events on the wire (the mode's PiJSONWriter).
 	// Nil means "no sink" — text-mode print drops them, which is pi's
@@ -84,13 +90,13 @@ type compactor struct {
 // newCompactor builds the executor for one agent/session pair. The agent is
 // attached after construction by newAgent, because the hook the agent needs
 // at construction time is a method on this struct.
-func newCompactor(mgr *session.SessionManager, settings compact.Settings, apiKey string, streamFn agent.StreamFn, emit func(agent.AgentEvent) error) *compactor {
+func newCompactor(mgr *session.SessionManager, settings compact.Settings, credential func(provider string) string, streamFn agent.StreamFn, emit func(agent.AgentEvent) error) *compactor {
 	return &compactor{
-		mgr:      mgr,
-		settings: settings,
-		apiKey:   apiKey,
-		streamFn: streamFn,
-		emit:     emit,
+		mgr:        mgr,
+		settings:   settings,
+		credential: credential,
+		streamFn:   streamFn,
+		emit:       emit,
 	}
 }
 
@@ -245,8 +251,11 @@ func (c *compactor) execute(ctx context.Context, prep *compact.Preparation, cust
 	state := c.agent.State()
 	opts := compact.RunOptions{
 		SummaryOptions: compact.SummaryOptions{
-			Model:     state.Model,
-			APIKey:    c.apiKey,
+			Model: state.Model,
+			// The summary request authenticates as the CURRENT model's
+			// provider, resolved per execution (P3) — never a key
+			// captured when the compactor was built.
+			APIKey:    c.credential(string(state.Model.Provider)),
 			Reasoning: ai.ThinkingLevel(state.ThinkingLevel),
 			SessionID: c.mgr.SessionID(),
 			StreamFn:  c.streamFn,

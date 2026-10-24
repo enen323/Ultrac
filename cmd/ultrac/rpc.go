@@ -204,8 +204,10 @@ func (host *rpcHost) ResumeSession(path string) error {
 // SetModel validates the selection against the available models, applies
 // it to the agent, and persists a model_change entry (pi:
 // agent-session.ts:2502-2514). pi also re-checks the provider credential
-// here; this port carries one credential in the settings env block for
-// every provider, so there is nothing provider-specific to check.
+// here; this port resolves credentials per request through the chain
+// (assemble.go's h.credential — models.json apiKey → auth.json, then the
+// settings env token), so a switch to a provider without a credential
+// surfaces at the next request as an endpoint error, not here.
 func (host *rpcHost) SetModel(provider, modelID string) (ai.Model, error) {
 	var found ai.Model
 	ok := false
