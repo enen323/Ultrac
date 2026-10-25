@@ -59,6 +59,10 @@ class StubKernel {
   /** What get_messages answers after a fork (the surviving projection). */
   forkKeeps: WireMessage[] | null = null;
 
+  /** What get_available_thinking_levels answers: the levels of the model IN
+   * USE, so a test can change it the way a re-save of that model does. */
+  thinkingAnswer: string[] = ["off", "low", "high"];
+
   // add_custom_model's answers: the fresh catalog on success (the store
   // patches the picker from it), or the kernel's refusal.
   addAnswer: CustomModelResult | null = null;
@@ -103,7 +107,7 @@ class StubKernel {
           ],
         });
       case "get_available_thinking_levels":
-        return ok({ levels: ["off", "low", "high"] });
+        return ok({ levels: this.thinkingAnswer });
       case "list_sessions":
         return ok({
           sessions: [
@@ -133,9 +137,26 @@ class StubKernel {
       }
       case "set_model":
         return ok({ ...(this.state.model ?? {}), id: command.modelId, name: command.modelId });
-      case "add_custom_model":
+      case "set_thinking_level": {
+        // The kernel clamps instead of rejecting (server.go's
+        // cmdSetThinkingLevel); the fake clamps the same way, so the store's
+        // follow-up get_state shows the settled level.
+        const requested = String(command.level);
+        this.state = {
+          ...this.state,
+          thinkingLevel: this.thinkingAnswer.includes(requested) ? requested : (this.thinkingAnswer[0] ?? "off"),
+        };
+        return ok(null);
+      }
+      case "add_custom_model": {
         if (this.addError) return { ok: true, command: command.type, success: false, error: this.addError };
+        // The kernel declares the model and reloads; if the saved model is
+        // the one in use, what it supports changed under the session — the
+        // fake mirrors that so a stale 思考 list shows up as a failure.
+        const levels = command.thinkingLevels;
+        if (Array.isArray(levels)) this.thinkingAnswer = ["off", ...(levels as string[])];
         return ok(this.addAnswer ?? { models: [], providers: [] });
+      }
       default:
         return ok(null);
     }
@@ -491,10 +512,18 @@ test("custom model: the dialog derives, submits, and the picker gains the model"
   await user.type(within(dialog).getByLabelText("密钥"), "sk-example");
   await user.type(within(dialog).getByLabelText("模型 id"), "example-chat");
   // The protocol select opens on the inferred dialect; the limits are
-  // prefilled with the plan's defaults.
+  // prefilled with the dropdown defaults; no thinking level is ticked, so
+  // the model is declared non-reasoning unless the user says otherwise.
   expect((within(dialog).getByLabelText("协议") as HTMLSelectElement).value).toBe("openai-completions");
-  expect((within(dialog).getByLabelText("上下文窗口") as HTMLInputElement).value).toBe("128000");
-  expect((within(dialog).getByLabelText("最大输出") as HTMLInputElement).value).toBe("8192");
+  expect((within(dialog).getByLabelText("上下文窗口") as HTMLSelectElement).value).toBe("131072");
+  expect((within(dialog).getByLabelText("最大输出") as HTMLSelectElement).value).toBe("32768");
+  for (const level of ["低", "中", "高"]) {
+    expect((within(dialog).getByLabelText(level) as HTMLInputElement).checked).toBe(false);
+  }
+  // Tick two levels and widen the window: 高 alone would NOT imply 中.
+  await user.click(within(dialog).getByLabelText("低"));
+  await user.click(within(dialog).getByLabelText("高"));
+  await user.selectOptions(within(dialog).getByLabelText("上下文窗口"), "262144");
   // The derivation is shown, not hidden: the provider field's placeholder
   // is the id the command will carry.
   expect((within(dialog).getByLabelText("provider id（选填）") as HTMLInputElement).placeholder).toBe("api-example-com");
@@ -509,8 +538,9 @@ test("custom model: the dialog derives, submits, and the picker gains the model"
   expect(call.api).toBe("openai-completions");
   expect(call.modelId).toBe("example-chat");
   expect(call.modelName).toBe("example-chat"); // the display name falls back to the id
-  expect(call.contextWindow).toBe(128000);
-  expect(call.maxTokens).toBe(8192);
+  expect(call.thinkingLevels).toEqual(["low", "high"]); // a set: 高 did not drag 中 along
+  expect(call.contextWindow).toBe(262144);
+  expect(call.maxTokens).toBe(32768);
 
   // The dialog closes and the picker offers the new model — patched from
   // the kernel's fresh catalog, no restart and no second round trip (D4).
@@ -518,6 +548,62 @@ test("custom model: the dialog derives, submits, and the picker gains the model"
   await waitFor(() => {
     const select = screen.getByLabelText("模型") as HTMLSelectElement;
     expect([...select.options].some((option) => option.value === "api-example-com/example-chat")).toBe(true);
+  });
+});
+
+test("custom model: re-saving the model in use refreshes the 思考 levels", async () => {
+  const user = userEvent.setup();
+  // The model in use is non-reasoning, so the top bar offers only 关. The
+  // dialog then re-saves THAT model with 中+高 ticked: no set_model runs, so
+  // the level list has to be re-read on its own. This is the regression —
+  // 思考 kept showing 关 after a save that clearly worked.
+  kernel.thinkingAnswer = ["off"];
+  kernel.addAnswer = { models: [kernel.state.model!], providers: [] };
+  render(<App store={store} bridge={kernel.bridge} />);
+  await kernel.load();
+  expect([...(screen.getByLabelText("思考") as HTMLSelectElement).options].map((o) => o.value)).toEqual(["off"]);
+
+  await user.click(screen.getByRole("button", { name: "自定义" }));
+  const dialog = await screen.findByRole("dialog", { name: "自定义模型" });
+  await user.type(within(dialog).getByLabelText("接口地址"), "https://api.example.com/v1");
+  await user.type(within(dialog).getByLabelText("密钥"), "sk-example");
+  await user.type(within(dialog).getByLabelText("模型 id"), "deepseek-chat");
+  await user.click(within(dialog).getByLabelText("中"));
+  await user.click(within(dialog).getByLabelText("高"));
+  await user.click(within(dialog).getByText("保存并添加"));
+
+  await waitFor(() => expect(kernel.callOf("add_custom_model").length).toBe(1));
+  expect(kernel.called("set_model")).toBe(false); // no switch to hang a refetch on
+  await waitFor(() => {
+    const select = screen.getByLabelText("思考") as HTMLSelectElement;
+    expect([...select.options].map((option) => option.value)).toEqual(["off", "medium", "high"]);
+  });
+});
+
+test("custom model: un-ticking the level the session runs asks for a clamp", async () => {
+  const user = userEvent.setup();
+  // The session runs 高 and the user re-saves the model with nothing ticked,
+  // so the model now supports only 关. A <select> cannot display a value that
+  // is not in its options, so the store asks the kernel to clamp
+  // (set_thinking_level clamps rather than rejects) and re-reads the state.
+  kernel.state = { ...kernel.state, thinkingLevel: "high" };
+  kernel.thinkingAnswer = ["off", "low", "high"];
+  kernel.addAnswer = { models: [kernel.state.model!], providers: [] };
+  render(<App store={store} bridge={kernel.bridge} />);
+  await kernel.load();
+
+  await user.click(screen.getByRole("button", { name: "自定义" }));
+  const dialog = await screen.findByRole("dialog", { name: "自定义模型" });
+  await user.type(within(dialog).getByLabelText("接口地址"), "https://api.example.com/v1");
+  await user.type(within(dialog).getByLabelText("密钥"), "sk-example");
+  await user.type(within(dialog).getByLabelText("模型 id"), "deepseek-chat");
+  await user.click(within(dialog).getByText("保存并添加"));
+
+  await waitFor(() =>
+    expect(kernel.callOf("set_thinking_level").some((command) => command.level === "high")).toBe(true),
+  );
+  await waitFor(() => {
+    expect((screen.getByLabelText("思考") as HTMLSelectElement).value).toBe("off");
   });
 });
 
@@ -536,13 +622,15 @@ test("custom model: local validation refuses before any round trip", async () =>
   expect(within(dialog).getByText("模型 id 必填")).toBeTruthy();
   expect(kernel.called("add_custom_model")).toBe(false);
 
-  // A non-http endpoint and a zero window are refused the same way (R1).
+  // A non-http endpoint is refused; so is the one illegal pair the two
+  // dropdowns can still express — an answer cap wider than the window the
+  // request has to fit in (plan D7). A zero window is now unreachable.
   await user.type(within(dialog).getByLabelText("接口地址"), "ftp://api.example.com");
-  await user.clear(within(dialog).getByLabelText("上下文窗口"));
-  await user.type(within(dialog).getByLabelText("上下文窗口"), "0");
+  await user.selectOptions(within(dialog).getByLabelText("上下文窗口"), "32768");
+  await user.selectOptions(within(dialog).getByLabelText("最大输出"), "1048576");
   await user.click(within(dialog).getByText("保存并添加"));
   expect(within(dialog).getByText("接口地址要是一个 http(s) 地址，且带主机名")).toBeTruthy();
-  expect(within(dialog).getByText("要填一个正整数（留空用默认值）")).toBeTruthy();
+  expect(within(dialog).getByText("最大输出不能大于上下文窗口")).toBeTruthy();
   expect(kernel.called("add_custom_model")).toBe(false);
 });
 

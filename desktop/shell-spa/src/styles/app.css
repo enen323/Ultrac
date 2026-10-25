@@ -697,7 +697,8 @@ textarea {
   gap: 4px;
 }
 
-.custom-row label {
+.custom-row label,
+.custom-row .custom-label {
   color: var(--muted);
   font-size: var(--fs-micro);
 }
@@ -722,6 +723,30 @@ textarea {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
+}
+
+/* The thinking checkboxes: three independent levels on one row, each a
+   clickable label. A set, not a ramp — so no radio group, no slider
+   (custom-model-thinking-limits-plan.md D1). */
+.custom-checks {
+  display: flex;
+  gap: 16px;
+  padding-top: 1px;
+}
+
+.custom-row label.custom-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text);
+  font-size: var(--fs-ui);
+  cursor: pointer;
+}
+
+.custom-check input[type="checkbox"] {
+  margin: 0;
+  accent-color: var(--net);
+  cursor: pointer;
 }
 
 .custom-hint {

@@ -315,8 +315,16 @@ export class SessionStore {
    * The response is the whole merged catalog, so the picker's source of
    * truth becomes the kernel's in one patch: the new model is selectable
    * immediately, without a restart and without a second round trip (D4).
-   * The thinking levels are left alone — a model switch refetches them,
-   * and the added model has not been selected yet.
+   *
+   * The LEVEL list is a second matter. It is the kernel's answer about the
+   * model currently in use (get_available_thinking_levels →
+   * ai.ClampThinkingLevel), and the dialog can save exactly that model: a
+   * re-save with 低/中/高 ticked changes what it supports while no
+   * set_model ever runs, so nothing else would refetch. Patching the
+   * catalog alone left 思考 showing only 关 after the user ticked 中+高 on
+   * the running model (custom-model-thinking-limits-plan.md R4 was wrong
+   * about this — "the added model has not been selected yet" does not hold
+   * for a re-save).
    *
    * null when the kernel refused (its message is in actionError, which
    * the dialog shows as its error bar while it is open).
@@ -328,6 +336,17 @@ export class SessionStore {
         ...spec,
       });
       this.#patch({ models: result.models ?? [] });
+      await this.#refreshThinkingLevels();
+      // …and the live session may still sit on a level the model no longer
+      // supports (un-tick 高 while the session runs 高). A <select> cannot
+      // display a value outside its options, so ask the kernel to clamp:
+      // set_thinking_level is the command that clamps rather than rejects
+      // (server.go's cmdSetThinkingLevel).
+      const level = this.#snapshot.state?.thinkingLevel;
+      if (level && !this.#snapshot.thinkingLevels.includes(level)) {
+        await callVoid(this.#bridge, { type: CmdSetThinkingLevel, level });
+        await this.#refreshState();
+      }
       return result;
     });
   }
@@ -392,6 +411,21 @@ export class SessionStore {
       this.#patch({ models: models.models ?? [], thinkingLevels: levels.levels ?? [] });
     } catch {
       // ditto
+    }
+  }
+
+  /**
+   * Re-read the levels the model in use supports. Separate from
+   * #refreshCatalogs because add_custom_model is the one flow that can
+   * change this list while the model stays put — the catalog there comes
+   * from the command's own response, so only the levels need asking.
+   */
+  async #refreshThinkingLevels(): Promise<void> {
+    try {
+      const data = await callData<{ levels: string[] }>(this.#bridge, { type: CmdGetAvailableThinking });
+      this.#patch({ thinkingLevels: data.levels ?? [] });
+    } catch {
+      // A failed read is one the next model switch corrects.
     }
   }
 

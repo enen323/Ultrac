@@ -12,11 +12,14 @@ import {
   API_OPENAI,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
+  THINKING_ORDER,
+  WINDOW_OPTIONS,
   buildSpec,
   deriveProviderId,
   effectiveProvider,
   emptyForm,
   inferAPI,
+  toggleThinkingLevel,
   validateForm,
   type CustomModelForm,
 } from "../src/ui/custom-model.ts";
@@ -89,15 +92,49 @@ test("validateForm: an explicit provider id must be a legal models.json key", ()
   assert.ok(!validateForm(form({ provider: "deepseek-chat" })).provider);
 });
 
-test("validateForm: the limits take the default when empty, refuse nonsense", () => {
-  // Empty means the default — clearing a prefilled field is not an error.
-  assert.deepEqual(validateForm(form({ contextWindow: "", maxTokens: "" })), {});
-  // The zero-window trap (R1): a zero silently disables auto-compaction.
-  assert.ok(validateForm(form({ contextWindow: "0" })).contextWindow);
-  assert.ok(validateForm(form({ maxTokens: "-1" })).maxTokens);
-  assert.ok(validateForm(form({ contextWindow: "十二万" })).contextWindow);
-  assert.ok(validateForm(form({ maxTokens: "8192.5" })).maxTokens);
-  assert.ok(!validateForm(form({ contextWindow: "64000", maxTokens: "4096" })).contextWindow);
+test("validateForm: the limits come from the option set, output must fit the window", () => {
+  // The dropdowns cannot produce a bad value, so the only ways in are a
+  // stale form or a caller bypassing the UI — both get refused rather than
+  // silently defaulted. The zero window (R1) is structurally impossible now.
+  assert.ok(validateForm(form({ contextWindow: 0 })).contextWindow);
+  assert.ok(validateForm(form({ contextWindow: 12345 })).contextWindow);
+  assert.ok(validateForm(form({ maxTokens: -1 })).maxTokens);
+  assert.ok(validateForm(form({ maxTokens: 8192 })).maxTokens); // not an option any more
+  // Output above the window is the pair every provider rejects (D7).
+  assert.equal(
+    validateForm(form({ contextWindow: 32768, maxTokens: 1048576 })).maxTokens,
+    "最大输出不能大于上下文窗口",
+  );
+  // Equal is legal; so is a window above the cap.
+  assert.deepEqual(validateForm(form({ contextWindow: 32768, maxTokens: 32768 })), {});
+  assert.deepEqual(validateForm(form({ contextWindow: 1048576, maxTokens: 65536 })), {});
+  // Every option is accepted in both fields — the set and the validator
+  // cannot drift apart.
+  for (const option of WINDOW_OPTIONS) {
+    const errors = validateForm(form({ contextWindow: option.value, maxTokens: option.value }));
+    assert.deepEqual(errors, {}, `${option.label} must be a legal pair`);
+  }
+});
+
+test("validateForm: thinking levels are the three the kernel accepts", () => {
+  // No ticked box is legal — it means "not a reasoning model" (D2).
+  assert.deepEqual(validateForm(form({ thinkingLevels: [] })), {});
+  assert.deepEqual(validateForm(form({ thinkingLevels: ["low", "high"] })), {});
+  // The kernel refuses everything outside {low, medium, high}, so the form
+  // does too rather than spending a round trip on it.
+  assert.ok(validateForm(form({ thinkingLevels: ["xhigh"] })).thinkingLevels);
+  assert.ok(validateForm(form({ thinkingLevels: ["max"] })).thinkingLevels);
+  assert.ok(validateForm(form({ thinkingLevels: [""] })).thinkingLevels);
+  assert.ok(validateForm(form({ thinkingLevels: ["HIGH"] })).thinkingLevels);
+});
+
+test("toggleThinkingLevel: ticked levels are independent", () => {
+  // The core of D1: ticking 高 must not drag 中 along, and un-ticking one
+  // level leaves the others alone.
+  assert.deepEqual(toggleThinkingLevel([], "high"), ["high"]);
+  assert.deepEqual(toggleThinkingLevel(["low"], "high"), ["low", "high"]);
+  assert.deepEqual(toggleThinkingLevel(["low", "high"], "high"), ["low"]);
+  assert.deepEqual(toggleThinkingLevel(["low", "high"], "medium"), ["low", "high", "medium"]);
 });
 
 // -- the spec the command carries ------------------------------------------------
@@ -109,6 +146,18 @@ test("buildSpec: derivations applied, defaults filled, nothing left to guess", (
   assert.equal(spec.modelName, "deepseek-chat"); // empty display name falls back to the id
   assert.equal(spec.contextWindow, DEFAULT_CONTEXT_WINDOW);
   assert.equal(spec.maxTokens, DEFAULT_MAX_TOKENS);
+  assert.deepEqual(spec.thinkingLevels, []); // non-reasoning unless ticked
+});
+
+test("buildSpec: thinking levels ride along as a set, in canonical order", () => {
+  // "Only high" stays only high — no implicit medium (D1).
+  assert.deepEqual(buildSpec(form({ thinkingLevels: ["high"] })).thinkingLevels, ["high"]);
+  // Click order must not reach the command (D4).
+  assert.deepEqual(buildSpec(form({ thinkingLevels: ["high", "low"] })).thinkingLevels, ["low", "high"]);
+  assert.deepEqual(
+    buildSpec(form({ thinkingLevels: ["high", "medium", "low"] })).thinkingLevels,
+    THINKING_ORDER,
+  );
 });
 
 test("buildSpec: explicit values ride along verbatim", () => {
@@ -117,15 +166,16 @@ test("buildSpec: explicit values ride along verbatim", () => {
       provider: "my-proxy",
       api: API_ANTHROPIC,
       modelName: "DeepSeek Chat",
-      contextWindow: "64000",
-      maxTokens: "4096",
+      thinkingLevels: ["low", "medium"],
+      contextWindow: 262144,
+      maxTokens: 65536,
     }),
   );
   assert.equal(spec.provider, "my-proxy");
   assert.equal(spec.api, API_ANTHROPIC);
   assert.equal(spec.modelName, "DeepSeek Chat");
-  assert.equal(spec.contextWindow, 64000);
-  assert.equal(spec.maxTokens, 4096);
+  assert.equal(spec.contextWindow, 262144);
+  assert.equal(spec.maxTokens, 65536);
 });
 
 test("buildSpec: the endpoint is trimmed, the key is not guessed at", () => {

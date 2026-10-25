@@ -22,15 +22,51 @@ export const API_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
 ];
 
 /**
- * The form's defaults (plan R1). contextWindow lives here and not at
- * zero: a zero window silently disables auto-compaction
- * (compact's `contextWindow <= 0` gate), so the field is prefilled and
- * validated rather than left to a zero that means nothing.
+ * The thinking levels the dialog exposes, in the order the checkboxes are
+ * drawn. These are exactly the values the kernel accepts in
+ * add_custom_model's thinkingLevels (internal/rpc/server.go's
+ * ValidateCustomModelSpec); "minimal"/"xhigh"/"max" exist in the kernel but
+ * are provider opt-ins the form deliberately does not offer.
  */
-export const DEFAULT_CONTEXT_WINDOW = 128000;
-export const DEFAULT_MAX_TOKENS = 8192;
+export const THINKING_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
+  { value: "low", label: "低" },
+  { value: "medium", label: "中" },
+  { value: "high", label: "高" },
+];
 
-/** The form's shape: every field a string, so a controlled input owns it. */
+/** The payload's canonical order (plan D4): a click order must not change
+ * the command, so buildSpec normalises to this sequence. */
+export const THINKING_ORDER: readonly string[] = THINKING_OPTIONS.map((option) => option.value);
+
+/**
+ * The window options, shared by 上下文窗口 and 最大输出: 32K to 1M. A closed
+ * set is the point — a free number field let "0" through, and a zero window
+ * silently disables auto-compaction (compact's `contextWindow <= 0` gate).
+ *
+ * The values are powers of two because the labels are; 128K means 131072,
+ * not 128000, so the option a user picks is the number the kernel stores.
+ */
+export const WINDOW_OPTIONS: ReadonlyArray<{ value: number; label: string }> = [
+  { value: 32768, label: "32K" },
+  { value: 65536, label: "64K" },
+  { value: 131072, label: "128K" },
+  { value: 262144, label: "256K" },
+  { value: 524288, label: "512K" },
+  { value: 1048576, label: "1M" },
+];
+
+const WINDOW_VALUES: ReadonlySet<number> = new Set(WINDOW_OPTIONS.map((option) => option.value));
+
+/**
+ * The form's defaults (plan R1/D6): the context window is the largest value
+ * that matches what endpoints call "128K", and the answer cap is 32K — an
+ * upper bound, not a per-turn target. Both are prefilled and validated rather
+ * than left to a zero that means nothing.
+ */
+export const DEFAULT_CONTEXT_WINDOW = 131072;
+export const DEFAULT_MAX_TOKENS = 32768;
+
+/** The form's shape: every text field a string, the choices typed. */
 export interface CustomModelForm {
   baseUrl: string;
   apiKey: string;
@@ -41,8 +77,10 @@ export interface CustomModelForm {
   modelName: string;
   /** Empty means "infer from the baseUrl". */
   api: string;
-  contextWindow: string;
-  maxTokens: string;
+  /** The ticked levels; empty means "not a reasoning model" (plan D1/D2). */
+  thinkingLevels: string[];
+  contextWindow: number;
+  maxTokens: number;
 }
 
 export function emptyForm(): CustomModelForm {
@@ -53,9 +91,19 @@ export function emptyForm(): CustomModelForm {
     modelId: "",
     modelName: "",
     api: "",
-    contextWindow: String(DEFAULT_CONTEXT_WINDOW),
-    maxTokens: String(DEFAULT_MAX_TOKENS),
+    thinkingLevels: [],
+    contextWindow: DEFAULT_CONTEXT_WINDOW,
+    maxTokens: DEFAULT_MAX_TOKENS,
   };
+}
+
+/**
+ * Toggle one checkbox: ticked levels are independent, so adding "high" to
+ * ["low"] yields ["low","high"] — never ["low","medium","high"]. Kept here
+ * (not in the dialog) so the rule is testable without a DOM.
+ */
+export function toggleThinkingLevel(levels: readonly string[], level: string): string[] {
+  return levels.includes(level) ? levels.filter((value) => value !== level) : [...levels, level];
 }
 
 /**
@@ -128,9 +176,11 @@ export function effectiveProvider(form: CustomModelForm): string {
  * the round trip. Returns one message per bad field, keyed by field
  * name; an empty object is a form the kernel accepts.
  *
- * The limits accept the empty string as "the default" (the field is
- * prefilled, and clearing it is not an error), but a non-numeric or
- * non-positive value is — that is the zero-window trap R1 names.
+ * The limits are taken from the option set, and the answer cap must not
+ * exceed the window: a provider rejects that pair outright, so it is caught
+ * here rather than as a 400 on the first prompt (plan D7). Every rule the
+ * kernel's protocol layer applies is mirrored, so a refusal costs no round
+ * trip.
  */
 export function validateForm(form: CustomModelForm): Record<string, string> {
   const errors: Record<string, string> = {};
@@ -156,27 +206,30 @@ export function validateForm(form: CustomModelForm): Record<string, string> {
   if (api !== API_OPENAI && api !== API_ANTHROPIC) {
     errors.api = "协议只能是这两种已注册的 dialect";
   }
-  const window = parseLimit(form.contextWindow, DEFAULT_CONTEXT_WINDOW);
-  if (window.error) errors.contextWindow = window.error;
-  const tokens = parseLimit(form.maxTokens, DEFAULT_MAX_TOKENS);
-  if (tokens.error) errors.maxTokens = tokens.error;
-  return errors;
-}
-
-function parseLimit(raw: string, fallback: number): { value: number; error?: string } {
-  const trimmed = raw.trim();
-  if (!trimmed) return { value: fallback };
-  const value = Number(trimmed);
-  if (!Number.isInteger(value) || value <= 0) {
-    return { value: fallback, error: "要填一个正整数（留空用默认值）" };
+  // The levels come from checkboxes, so a bad value means a stale form or a
+  // caller bypassing the UI — the kernel refuses it the same way (only low,
+  // medium and high are accepted).
+  if (form.thinkingLevels.some((level) => !THINKING_ORDER.includes(level))) {
+    errors.thinkingLevels = "思考强度只能是低、中、高";
   }
-  return { value };
+  if (!WINDOW_VALUES.has(form.contextWindow)) {
+    errors.contextWindow = "要从列表里选一个上下文窗口档位";
+  }
+  if (!WINDOW_VALUES.has(form.maxTokens)) {
+    errors.maxTokens = "要从列表里选一个输出档位";
+  } else if (form.maxTokens > form.contextWindow) {
+    errors.maxTokens = "最大输出不能大于上下文窗口";
+  }
+  return errors;
 }
 
 /**
  * Build the command's payload: every derivation applied, every default
  * filled, nothing left for the kernel to guess. Call it only when
  * validateForm came back empty — it does not re-check.
+ *
+ * The levels are normalised to THINKING_ORDER, so the checkbox click order
+ * never leaks into the command (plan D4).
  */
 export function buildSpec(form: CustomModelForm): CustomModelSpec {
   const modelId = form.modelId.trim();
@@ -187,7 +240,8 @@ export function buildSpec(form: CustomModelForm): CustomModelSpec {
     api: form.api || inferAPI(form.baseUrl),
     modelId,
     modelName: form.modelName.trim() || modelId,
-    contextWindow: parseLimit(form.contextWindow, DEFAULT_CONTEXT_WINDOW).value,
-    maxTokens: parseLimit(form.maxTokens, DEFAULT_MAX_TOKENS).value,
+    thinkingLevels: THINKING_ORDER.filter((level) => form.thinkingLevels.includes(level)),
+    contextWindow: form.contextWindow,
+    maxTokens: form.maxTokens,
   };
 }

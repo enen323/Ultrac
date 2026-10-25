@@ -4,6 +4,13 @@
 // baseUrl with the derivation shown (D2 — a smart default the user can
 // see and override, never a hidden one).
 //
+// Two fields are choices rather than text
+// (custom-model-thinking-limits-plan.md): 思考强度 is three independent
+// checkboxes — the levels the model SUPPORTS, which is exactly what the
+// top bar's 思考 select reads — and the two limits are dropdowns over a
+// closed 32K–1M set, so the zero window that silently disables
+// auto-compaction cannot be typed at all.
+//
 // Submitting is add_custom_model: the kernel writes the credential to
 // settings' providers section at the user layer,
 // so the model is there whatever directory the next launch starts from
@@ -22,11 +29,14 @@ import {
   API_OPTIONS,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
+  THINKING_OPTIONS,
+  WINDOW_OPTIONS,
   buildSpec,
   deriveProviderId,
   effectiveProvider,
   emptyForm,
   inferAPI,
+  toggleThinkingLevel,
   validateForm,
   type CustomModelForm,
 } from "./custom-model.ts";
@@ -208,31 +218,68 @@ export function CustomModelDialog({ models, error, onAdd, onClose }: Props) {
             <p className="custom-hint">按接口地址猜了一个，不对就改。</p>
           </div>
 
+          <div className="custom-row">
+            <span className="custom-label" id="custom-thinking-label">
+              思考强度
+            </span>
+            <div className="custom-checks" role="group" aria-labelledby="custom-thinking-label">
+              {THINKING_OPTIONS.map((option) => (
+                <label key={option.value} className="custom-check" htmlFor={`custom-thinking-${option.value}`}>
+                  <input
+                    id={`custom-thinking-${option.value}`}
+                    type="checkbox"
+                    checked={form.thinkingLevels.includes(option.value)}
+                    onChange={() =>
+                      set({ thinkingLevels: toggleThinkingLevel(form.thinkingLevels, option.value) })
+                    }
+                  />
+                  {option.label}
+                </label>
+              ))}
+            </div>
+            <p className="custom-hint">
+              勾中的档位才是这个模型支持的档位，顶栏「思考」里只会出现它们；全不选 = 不支持思考。
+              各档互不包含（只勾「高」不会带上「中」）。只勾高档时，会话里选低档会被自动提到高档。
+            </p>
+            <p className="custom-hint">重新保存同名模型会覆盖手改的 thinkingLevelMap。</p>
+            {field("thinkingLevels") && <p className="custom-err">{field("thinkingLevels")}</p>}
+          </div>
+
           <div className="custom-pair">
             <div className="custom-row">
               <label htmlFor="custom-window">上下文窗口</label>
-              <input
+              <select
                 id="custom-window"
-                value={form.contextWindow}
-                inputMode="numeric"
-                onChange={(event) => set({ contextWindow: event.target.value })}
-              />
+                value={String(form.contextWindow)}
+                onChange={(event) => set({ contextWindow: Number(event.target.value) })}
+              >
+                {WINDOW_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
               {field("contextWindow") && <p className="custom-err">{field("contextWindow")}</p>}
             </div>
             <div className="custom-row">
               <label htmlFor="custom-tokens">最大输出</label>
-              <input
+              <select
                 id="custom-tokens"
-                value={form.maxTokens}
-                inputMode="numeric"
-                onChange={(event) => set({ maxTokens: event.target.value })}
-              />
+                value={String(form.maxTokens)}
+                onChange={(event) => set({ maxTokens: Number(event.target.value) })}
+              >
+                {WINDOW_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
               {field("maxTokens") && <p className="custom-err">{field("maxTokens")}</p>}
             </div>
           </div>
           <p className="custom-hint">
-            默认 {DEFAULT_CONTEXT_WINDOW.toLocaleString()} / {DEFAULT_MAX_TOKENS.toLocaleString()}；
-            留空用默认。窗口填 0 会让自动压缩永不触发，别这么做。
+            默认 {DEFAULT_CONTEXT_WINDOW / 1024}K / {DEFAULT_MAX_TOKENS / 1024}K；输出是上限，不是每轮实际生成长度。
+            压缩阈值按上下文窗口算，别为了省钱把它调得比实际模型小太多。
           </p>
 
           <div className="custom-foot">

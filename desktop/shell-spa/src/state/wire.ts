@@ -190,6 +190,15 @@ export interface CustomModelSpec {
   modelId: string;
   /** The picker's display name; the kernel falls back to the id. */
   modelName: string;
+  /**
+   * The thinking levels the model supports — the dialog's checkboxes, each
+   * one of "low" / "medium" / "high". An empty array means "not a reasoning
+   * model": the kernel then writes neither reasoning nor thinkingLevelMap,
+   * so the declaration stays exactly what this flow wrote before the
+   * checkboxes existed. The levels are a set, not a severity ramp — "high"
+   * alone must not imply "medium" (custom-model-thinking-limits-plan.md D1).
+   */
+  thinkingLevels: string[];
   contextWindow: number;
   maxTokens: number;
 }
