@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -271,6 +272,158 @@ func TestAddCustomModelRejectsBadSpec(t *testing.T) {
 	if _, ok := onDisk[customSpec().Provider]; ok {
 		t.Fatalf("a refused spec wrote providers: %+v", onDisk)
 	}
+}
+
+// TestAddCustomModelThinkingLevels — the dialog's checkboxes land as a
+// support SET, not a severity ramp (custom-model-thinking-limits-plan.md
+// D1): "only high" must offer high without low or medium, and "low + high"
+// must not grow a medium in between. Every case is checked twice — on the
+// live harness (D4 hot reload) and on a harness built from the file alone
+// (the restart path) — plus once on the bytes, because an ABSENT level
+// counts as SUPPORTED (ai.SupportedThinkingLevels) and only the explicit
+// nulls keep the picker honest (D5).
+func TestAddCustomModelThinkingLevels(t *testing.T) {
+	cases := []struct {
+		name   string
+		levels []string
+		want   []ai.ModelThinkingLevel
+	}{
+		{"only high", []string{"high"}, []ai.ModelThinkingLevel{ai.ModelThinkOff, ai.ModelThinkHigh}},
+		{"only low", []string{"low"}, []ai.ModelThinkingLevel{ai.ModelThinkOff, ai.ModelThinkLow}},
+		{"low and high", []string{"low", "high"}, []ai.ModelThinkingLevel{ai.ModelThinkOff, ai.ModelThinkLow, ai.ModelThinkHigh}},
+		{"all three", []string{"low", "medium", "high"}, []ai.ModelThinkingLevel{ai.ModelThinkOff, ai.ModelThinkLow, ai.ModelThinkMedium, ai.ModelThinkHigh}},
+		{"duplicate collapses", []string{"low", "low", "high"}, []ai.ModelThinkingLevel{ai.ModelThinkOff, ai.ModelThinkLow, ai.ModelThinkHigh}},
+		{"none", nil, []ai.ModelThinkingLevel{ai.ModelThinkOff}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newPrintEnv(t)
+			h, code := buildHarness(env.flags, env.cwd, io.Discard, env.provider.streamFn)
+			if code != 0 {
+				t.Fatalf("buildHarness exit = %d, want 0", code)
+			}
+			spec := customSpec()
+			spec.ThinkingLevels = tc.levels
+			if _, err := newRPCHost(h, context.Background()).AddCustomModel(spec); err != nil {
+				t.Fatalf("AddCustomModel: %v", err)
+			}
+
+			if got := ai.SupportedThinkingLevels(catalogModel(t, h, spec)); !slices.Equal(got, tc.want) {
+				t.Errorf("live levels = %v, want %v", got, tc.want)
+			}
+			h2, code := buildHarness(env.flags, env.cwd, io.Discard, env.provider.streamFn)
+			if code != 0 {
+				t.Fatalf("second buildHarness exit = %d, want 0", code)
+			}
+			if got := ai.SupportedThinkingLevels(catalogModel(t, h2, spec)); !slices.Equal(got, tc.want) {
+				t.Errorf("levels after restart = %v, want %v", got, tc.want)
+			}
+
+			def := modelDefinitionOnDisk(t, env.home, spec)
+			if len(tc.levels) == 0 {
+				// A non-reasoning declaration must stay byte-identical to
+				// what this flow wrote before the levels existed (D2).
+				if def.Reasoning != nil || def.ThinkingLevelMap != nil {
+					t.Errorf("definition = %+v, want neither field for a non-reasoning model", def)
+				}
+				if raw := readFile(t, filepath.Join(env.home, "settings.json")); strings.Contains(raw, `"reasoning"`) ||
+					strings.Contains(raw, `"thinkingLevelMap"`) {
+					t.Errorf("settings.json grew a reasoning block nobody asked for:\n%s", raw)
+				}
+				return
+			}
+			if def.Reasoning == nil || !*def.Reasoning {
+				t.Fatalf("reasoning = %v, want true once any level is ticked", def.Reasoning)
+			}
+			ticked := map[ai.ModelThinkingLevel]bool{}
+			for _, level := range tc.levels {
+				ticked[ai.ModelThinkingLevel(level)] = true
+			}
+			for _, level := range []ai.ModelThinkingLevel{
+				ai.ModelThinkMinimal, ai.ModelThinkLow, ai.ModelThinkMedium,
+				ai.ModelThinkHigh, ai.ModelThinkXHigh, ai.ModelThinkMax,
+			} {
+				value, present := def.ThinkingLevelMap[level]
+				if !present {
+					t.Errorf("thinkingLevelMap[%s] is absent — an absent level counts as supported", level)
+					continue
+				}
+				if ticked[level] {
+					if value == nil || *value != string(level) {
+						t.Errorf("thinkingLevelMap[%s] = %v, want the identity mapping", level, value)
+					}
+					continue
+				}
+				if value != nil {
+					t.Errorf("thinkingLevelMap[%s] = %q, want nil for an unticked level", level, *value)
+				}
+			}
+		})
+	}
+}
+
+// TestAddCustomModelThinkingLevelsCleared — re-saving with nothing ticked
+// takes the capability away again. The upsert replaces the definition
+// wholesale (D8), so "omitted" means "not a reasoning model" rather than
+// "keep what was there"; without this there would be no way back through
+// the dialog.
+func TestAddCustomModelThinkingLevelsCleared(t *testing.T) {
+	env := newPrintEnv(t)
+	h, code := buildHarness(env.flags, env.cwd, io.Discard, env.provider.streamFn)
+	if code != 0 {
+		t.Fatalf("buildHarness exit = %d, want 0", code)
+	}
+	host := newRPCHost(h, context.Background())
+
+	reasoning := customSpec()
+	reasoning.ThinkingLevels = []string{"high"}
+	if _, err := host.AddCustomModel(reasoning); err != nil {
+		t.Fatalf("AddCustomModel(high): %v", err)
+	}
+	if got := ai.SupportedThinkingLevels(catalogModel(t, h, reasoning)); !slices.Equal(got,
+		[]ai.ModelThinkingLevel{ai.ModelThinkOff, ai.ModelThinkHigh}) {
+		t.Fatalf("levels = %v, want the declared high", got)
+	}
+
+	if _, err := host.AddCustomModel(customSpec()); err != nil {
+		t.Fatalf("AddCustomModel(none): %v", err)
+	}
+	if got := ai.SupportedThinkingLevels(catalogModel(t, h, reasoning)); !slices.Equal(got,
+		[]ai.ModelThinkingLevel{ai.ModelThinkOff}) {
+		t.Errorf("levels after clearing = %v, want off only", got)
+	}
+	if def := modelDefinitionOnDisk(t, env.home, reasoning); def.Reasoning != nil || def.ThinkingLevelMap != nil {
+		t.Errorf("definition = %+v, want the reasoning fields gone again", def)
+	}
+}
+
+// catalogModel finds the model a spec declared in the harness's catalog.
+func catalogModel(t *testing.T, h *harness, spec rpc.CustomModelSpec) ai.Model {
+	t.Helper()
+	for _, m := range h.availableModels() {
+		if m.Provider == ai.ProviderId(spec.Provider) && m.ID == spec.ModelID {
+			return m
+		}
+	}
+	t.Fatalf("catalog has no %s/%s", spec.Provider, spec.ModelID)
+	return ai.Model{}
+}
+
+// modelDefinitionOnDisk reads the declaration back from the user settings
+// file — the authority, not the in-memory snapshot.
+func modelDefinitionOnDisk(t *testing.T, home string, spec rpc.CustomModelSpec) models.ModelDefinition {
+	t.Helper()
+	entry, ok := providersOnDisk(t, home)[spec.Provider]
+	if !ok {
+		t.Fatalf("no %q provider in settings.json", spec.Provider)
+	}
+	for _, def := range entry.Models {
+		if def.ID == spec.ModelID {
+			return def
+		}
+	}
+	t.Fatalf("provider %q has no model %q", spec.Provider, spec.ModelID)
+	return models.ModelDefinition{}
 }
 
 func readFile(t *testing.T, path string) string {

@@ -435,6 +435,9 @@ func upsertCustomProvider(providers map[string]models.ProviderConfig, spec rpc.C
 		ContextWindow: &spec.ContextWindow,
 		MaxTokens:     &spec.MaxTokens,
 	}
+	// The dialog's thinking checkboxes: nil for a non-reasoning model, a
+	// fully populated map otherwise (plan D1/D2/D5).
+	def.Reasoning, def.ThinkingLevelMap = thinkingDeclaration(spec.ThinkingLevels)
 	if spec.ModelName != "" {
 		def.Name = spec.ModelName
 	}
@@ -451,6 +454,51 @@ func upsertCustomProvider(providers map[string]models.ProviderConfig, spec rpc.C
 	}
 	entry.Models = append(entry.Models, def)
 	providers[spec.Provider] = entry
+}
+
+// thinkingDeclaration turns the dialog's ticked levels into the model
+// definition's reasoning pair (custom-model-thinking-limits-plan.md
+// D1/D2/D5).
+//
+// No levels means "not a reasoning model", and BOTH fields stay nil: that
+// keeps a re-save of a plain model writing exactly what this flow wrote
+// before the checkboxes existed — no reasoning key appears out of nowhere
+// for a user who only changed the window (D2).
+//
+// Otherwise reasoning is true and the map names all six non-off levels
+// explicitly: the ticked ones identity-mapped, the rest nil. The explicit
+// nulls are load-bearing — ai.SupportedThinkingLevels treats an ABSENT
+// level as SUPPORTED (model.go:203-221), so omitting "medium" would make
+// the picker's 思考 select offer a level the user deliberately did not
+// tick. xhigh/max need an entry even to stay out of the list.
+//
+// A repeated level collapses on its own: the map is keyed by level (D10).
+func thinkingDeclaration(levels []string) (*bool, ai.ThinkingLevelMap) {
+	if len(levels) == 0 {
+		return nil, nil
+	}
+	ticked := make(map[string]bool, len(levels))
+	for _, level := range levels {
+		ticked[level] = true
+	}
+	reasoning := true
+	declared := make(ai.ThinkingLevelMap, 6)
+	for _, level := range []ai.ModelThinkingLevel{
+		ai.ModelThinkMinimal,
+		ai.ModelThinkLow,
+		ai.ModelThinkMedium,
+		ai.ModelThinkHigh,
+		ai.ModelThinkXHigh,
+		ai.ModelThinkMax,
+	} {
+		if !ticked[string(level)] {
+			declared[level] = nil // present-and-null: unsupported
+			continue
+		}
+		value := string(level)
+		declared[level] = &value
+	}
+	return &reasoning, declared
 }
 
 // customModelCatalog builds add_custom_model's response from the fresh
