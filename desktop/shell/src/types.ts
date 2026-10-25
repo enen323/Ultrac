@@ -106,9 +106,12 @@ export interface RpcModel {
 
 // Command names — the closed set, mirroring the const block in
 // internal/rpc/types.go. list_sessions / resume_session are the Ultrac
-// extensions added for this shell (plan §1, P-D0); everything pi has that
-// this port does not implement is absent on purpose, so a client that
-// sends one gets an error response instead of silence.
+// extensions added for this shell (plan §1, P-D0); add_custom_model is
+// the custom-model flow's one command (custom-model-plan.md), mirrored
+// here for the same reason: a client that sends it must not get silence.
+// Everything pi has that this port does not implement is absent on
+// purpose, so a client that sends one gets an error response instead of
+// silence.
 export const CmdPrompt = "prompt";
 export const CmdSteer = "steer";
 export const CmdFollowUp = "follow_up";
@@ -129,3 +132,4 @@ export const CmdGetEntries = "get_entries";
 export const CmdGetCommands = "get_commands";
 export const CmdListSessions = "list_sessions";
 export const CmdResumeSession = "resume_session";
+export const CmdAddCustomModel = "add_custom_model";

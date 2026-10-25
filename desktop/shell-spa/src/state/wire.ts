@@ -40,6 +40,16 @@ export interface RpcCommand {
   // compact
   customInstructions?: string;
 
+  // add_custom_model (an Ultrac extension, like list_sessions): the
+  // provider/modelId fields above are reused for the spec's provider id
+  // and model id; the rest are this command's own.
+  baseUrl?: string;
+  apiKey?: string;
+  api?: string;
+  modelName?: string;
+  contextWindow?: number;
+  maxTokens?: number;
+
   // fork / clone
   entryId?: string;
 }
@@ -152,6 +162,54 @@ export interface ForkMessage {
 export interface ForkResult {
   leafId: string | null;
   editorText?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Custom models (custom-model-plan.md)
+// ---------------------------------------------------------------------------
+
+/**
+ * CustomModelSpec — add_custom_model's payload (internal/rpc/types.go).
+ * One command, one user intent: the kernel writes the credential to
+ * auth.json, the declaration to models.json, reloads, and answers (D3).
+ *
+ * It deliberately carries no source/layer field: both files are written
+ * at the user layer, which is cwd-independent, so the layer is not the
+ * client's to choose (D8).
+ */
+export interface CustomModelSpec {
+  /** The models.json key, and set_model's "provider/" part. */
+  provider: string;
+  /** The endpoint root ("https://api.example.com/v1"). */
+  baseUrl: string;
+  /** The literal credential; it lands in auth.json, never models.json (D1). */
+  apiKey: string;
+  /** The dialect: one of the two the kernel registers (F2). */
+  api: string;
+  /** The endpoint's model id ("deepseek-chat"). */
+  modelId: string;
+  /** The picker's display name; the kernel falls back to the id. */
+  modelName: string;
+  contextWindow: number;
+  maxTokens: number;
+}
+
+/** CustomModelProviderInfo — one provider in add_custom_model's response. */
+export interface CustomModelProviderInfo {
+  id: string;
+  baseUrl: string;
+  api: string;
+  modelIds: string[];
+}
+
+/**
+ * AddCustomModelResult — the command's response data: the fresh model
+ * catalog (the picker patches from it, no second round trip) plus every
+ * user-declared provider (built-in-only providers are absent).
+ */
+export interface CustomModelResult {
+  models: RpcModel[];
+  providers: CustomModelProviderInfo[];
 }
 
 // ---------------------------------------------------------------------------

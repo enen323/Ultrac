@@ -13,6 +13,7 @@ import type { UltracBridge } from "../port/bridge.ts";
 import type { SessionStore } from "../state/session.ts";
 import { contextTokens } from "../state/transcript.ts";
 import type { ForkMessage } from "../state/wire.ts";
+import { CustomModelDialog } from "./CustomModelDialog.tsx";
 import { dismissBoot } from "./boot.ts";
 import { Composer } from "./Composer.tsx";
 import { ForkPicker } from "./ForkPicker.tsx";
@@ -34,6 +35,9 @@ export function App({ store, bridge }: { store: SessionStore; bridge: UltracBrid
   const [forkList, setForkList] = useState<ForkMessage[]>([]);
   const [forkLoading, setForkLoading] = useState(false);
   const [prefill, setPrefill] = useState<string | null>(null);
+
+  // The custom-model dialog: one form, one add_custom_model command.
+  const [customOpen, setCustomOpen] = useState(false);
 
   useEffect(() => {
     if (snap.ready) dismissBoot();
@@ -116,7 +120,24 @@ export function App({ store, bridge }: { store: SessionStore; bridge: UltracBrid
             onSetModel={(provider, modelId) => void store.setModel(provider, modelId)}
             onSetThinkingLevel={(level) => void store.setThinkingLevel(level)}
           />
+          <button
+            type="button"
+            className="head-action"
+            onClick={() => setCustomOpen(true)}
+            title="添加一个自定义端点模型（OpenAI / Anthropic 兼容协议）"
+          >
+            自定义
+          </button>
         </header>
+
+        {customOpen && (
+          <CustomModelDialog
+            models={snap.models}
+            error={snap.actionError}
+            onAdd={(spec) => store.addCustomModel(spec)}
+            onClose={() => setCustomOpen(false)}
+          />
+        )}
 
         <Transcript transcript={snap.transcript} bridge={bridge} />
 

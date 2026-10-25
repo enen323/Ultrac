@@ -25,6 +25,17 @@ function levelLabel(level: string): string {
   return LEVEL_LABELS[level] ?? level;
 }
 
+/**
+ * An option's value is the provider/id pair, not the bare id: a custom
+ * model can share an id with a built-in one (DeepSeek's chat under both
+ * "deepseek" and a user-declared "api-deepseek-com"), and a bare id
+ * would make the two indistinguishable in the <select> — the pick would
+ * silently land on whichever entry the catalog lists first.
+ */
+function optionValue(entry: RpcModel): string {
+  return `${entry.provider}/${entry.id}`;
+}
+
 interface Props {
   models: RpcModel[];
   thinkingLevels: string[];
@@ -52,7 +63,9 @@ export function ModelPicker({
   }
   // The current model is always selectable, even if the catalog fetch failed
   // and it is the only entry there is.
-  const hasCurrent = model ? models.some((entry) => entry.id === model.id) : false;
+  const hasCurrent = model
+    ? models.some((entry) => entry.provider === model.provider && entry.id === model.id)
+    : false;
 
   return (
     <>
@@ -61,17 +74,17 @@ export function ModelPicker({
       </label>
       <select
         id="model-select"
-        value={model?.id ?? ""}
+        value={model ? optionValue(model) : ""}
         onChange={(event) => {
-          const entry = models.find((candidate) => candidate.id === event.target.value);
+          const entry = models.find((candidate) => optionValue(candidate) === event.target.value);
           if (entry) onSetModel(entry.provider, entry.id);
         }}
       >
-        {model && !hasCurrent && <option value={model.id}>{model.name}</option>}
+        {model && !hasCurrent && <option value={optionValue(model)}>{model.name}</option>}
         {[...groups].map(([provider, entries]) => (
           <optgroup key={provider} label={provider}>
             {entries.map((entry) => (
-              <option key={entry.id} value={entry.id}>
+              <option key={optionValue(entry)} value={optionValue(entry)}>
                 {entry.name}
                 {entry.reasoning ? " · 推理" : ""}
               </option>

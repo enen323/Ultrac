@@ -16,10 +16,11 @@ import userEvent from "@testing-library/user-event";
 import { App } from "../../src/ui/App.tsx";
 import { SessionStore } from "../../src/state/session.ts";
 import type { CallResult, UltracBridge } from "../../src/port/bridge.ts";
-import type { CompactResult, ForkMessage, ForkResult, RpcEvent, RpcSessionState, WireMessage } from "../../src/state/wire.ts";
+import type { CompactResult, CustomModelResult, ForkMessage, ForkResult, RpcEvent, RpcSessionState, WireMessage } from "../../src/state/wire.ts";
 
 // The page under test drives the P-C4 dock entries too: the compaction
-// button, the fork picker, and the compacting flag on the water mark.
+// button, the fork picker, and the compacting flag on the water mark —
+// and the custom-model dialog (custom-model-plan.md P4).
 
 // -- the stub kernel ------------------------------------------------------------
 
@@ -57,6 +58,11 @@ class StubKernel {
   forkAnswer: ForkResult = { leafId: null };
   /** What get_messages answers after a fork (the surviving projection). */
   forkKeeps: WireMessage[] | null = null;
+
+  // add_custom_model's answers: the fresh catalog on success (the store
+  // patches the picker from it), or the kernel's refusal.
+  addAnswer: CustomModelResult | null = null;
+  addError: string | null = null;
 
   readonly bridge: UltracBridge = {
     shell: "electron",
@@ -127,6 +133,9 @@ class StubKernel {
       }
       case "set_model":
         return ok({ ...(this.state.model ?? {}), id: command.modelId, name: command.modelId });
+      case "add_custom_model":
+        if (this.addError) return { ok: true, command: command.type, success: false, error: this.addError };
+        return ok(this.addAnswer ?? { models: [], providers: [] });
       default:
         return ok(null);
     }
@@ -282,7 +291,9 @@ test("model and thinking switches call the kernel", async () => {
   render(<App store={store} bridge={kernel.bridge} />);
   await kernel.load();
 
-  await user.selectOptions(screen.getByLabelText("模型"), "deepseek-reasoner");
+  // The option value is the provider/id pair (ModelPicker): two providers
+  // can expose the same model id once custom models exist.
+  await user.selectOptions(screen.getByLabelText("模型"), "dsanthropic/deepseek-reasoner");
   await waitFor(() =>
     expect(kernel.callOf("set_model").some((command) => command.provider === "dsanthropic" && command.modelId === "deepseek-reasoner")).toBe(true),
   );
@@ -453,4 +464,119 @@ test("fork: a session with nothing to fork says so, and cancel closes the picker
   await user.click(within(dialog).getByText("取消"));
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(kernel.called("fork")).toBe(false);
+});
+
+// -- custom models (custom-model-plan.md P4) ------------------------------------
+
+test("custom model: the dialog derives, submits, and the picker gains the model", async () => {
+  const user = userEvent.setup();
+  // The kernel's fresh catalog: the two built-ins plus the added one.
+  kernel.addAnswer = {
+    models: [
+      kernel.state.model!,
+      { id: "deepseek-reasoner", name: "DeepSeek Reasoner", api: "anthropic-messages", provider: "dsanthropic", reasoning: true, contextWindow: 128000 },
+      { id: "example-chat", name: "Example Chat", api: "openai-completions", provider: "api-example-com", baseUrl: "https://api.example.com/v1", contextWindow: 128000, maxTokens: 8192 },
+    ],
+    providers: [
+      { id: "api-example-com", baseUrl: "https://api.example.com/v1", api: "openai-completions", modelIds: ["example-chat"] },
+    ],
+  };
+  render(<App store={store} bridge={kernel.bridge} />);
+  await kernel.load();
+
+  await user.click(screen.getByRole("button", { name: "自定义" }));
+  const dialog = await screen.findByRole("dialog", { name: "自定义模型" });
+
+  await user.type(within(dialog).getByLabelText("接口地址"), "https://api.example.com/v1");
+  await user.type(within(dialog).getByLabelText("密钥"), "sk-example");
+  await user.type(within(dialog).getByLabelText("模型 id"), "example-chat");
+  // The protocol select opens on the inferred dialect; the limits are
+  // prefilled with the plan's defaults.
+  expect((within(dialog).getByLabelText("协议") as HTMLSelectElement).value).toBe("openai-completions");
+  expect((within(dialog).getByLabelText("上下文窗口") as HTMLInputElement).value).toBe("128000");
+  expect((within(dialog).getByLabelText("最大输出") as HTMLInputElement).value).toBe("8192");
+  // The derivation is shown, not hidden: the provider field's placeholder
+  // is the id the command will carry.
+  expect((within(dialog).getByLabelText("provider id（选填）") as HTMLInputElement).placeholder).toBe("api-example-com");
+
+  await user.click(within(dialog).getByText("保存并添加"));
+
+  await waitFor(() => expect(kernel.callOf("add_custom_model").length).toBe(1));
+  const call = kernel.callOf("add_custom_model")[0];
+  expect(call.provider).toBe("api-example-com"); // derived and explicit, never empty
+  expect(call.baseUrl).toBe("https://api.example.com/v1");
+  expect(call.apiKey).toBe("sk-example");
+  expect(call.api).toBe("openai-completions");
+  expect(call.modelId).toBe("example-chat");
+  expect(call.modelName).toBe("example-chat"); // the display name falls back to the id
+  expect(call.contextWindow).toBe(128000);
+  expect(call.maxTokens).toBe(8192);
+
+  // The dialog closes and the picker offers the new model — patched from
+  // the kernel's fresh catalog, no restart and no second round trip (D4).
+  expect(screen.queryByRole("dialog")).toBeNull();
+  await waitFor(() => {
+    const select = screen.getByLabelText("模型") as HTMLSelectElement;
+    expect([...select.options].some((option) => option.value === "api-example-com/example-chat")).toBe(true);
+  });
+});
+
+test("custom model: local validation refuses before any round trip", async () => {
+  const user = userEvent.setup();
+  render(<App store={store} bridge={kernel.bridge} />);
+  await kernel.load();
+
+  await user.click(screen.getByRole("button", { name: "自定义" }));
+  const dialog = await screen.findByRole("dialog", { name: "自定义模型" });
+
+  // An empty form: the required fields complain, the kernel is not called.
+  await user.click(within(dialog).getByText("保存并添加"));
+  expect(within(dialog).getByText("接口地址必填")).toBeTruthy();
+  expect(within(dialog).getByText("密钥必填（本地无鉴权端点可填任意占位符）")).toBeTruthy();
+  expect(within(dialog).getByText("模型 id 必填")).toBeTruthy();
+  expect(kernel.called("add_custom_model")).toBe(false);
+
+  // A non-http endpoint and a zero window are refused the same way (R1).
+  await user.type(within(dialog).getByLabelText("接口地址"), "ftp://api.example.com");
+  await user.clear(within(dialog).getByLabelText("上下文窗口"));
+  await user.type(within(dialog).getByLabelText("上下文窗口"), "0");
+  await user.click(within(dialog).getByText("保存并添加"));
+  expect(within(dialog).getByText("接口地址要是一个 http(s) 地址，且带主机名")).toBeTruthy();
+  expect(within(dialog).getByText("要填一个正整数（留空用默认值）")).toBeTruthy();
+  expect(kernel.called("add_custom_model")).toBe(false);
+});
+
+test("custom model: a kernel refusal lands in the dialog's error bar and keeps it open", async () => {
+  const user = userEvent.setup();
+  kernel.addError = "write auth.json: Access is denied";
+  render(<App store={store} bridge={kernel.bridge} />);
+  await kernel.load();
+
+  await user.click(screen.getByRole("button", { name: "自定义" }));
+  const dialog = await screen.findByRole("dialog", { name: "自定义模型" });
+  await user.type(within(dialog).getByLabelText("接口地址"), "https://api.example.com/v1");
+  await user.type(within(dialog).getByLabelText("密钥"), "sk-example");
+  await user.type(within(dialog).getByLabelText("模型 id"), "example-chat");
+  await user.click(within(dialog).getByText("保存并添加"));
+
+  // The kernel's message, verbatim, in the bar; the form stays so the
+  // user can fix and retry.
+  expect(await within(dialog).findByText("write auth.json: Access is denied")).toBeTruthy();
+  expect(screen.queryByRole("dialog")).toBeTruthy();
+});
+
+test("custom model: an existing provider id gets the overwrite warning", async () => {
+  const user = userEvent.setup();
+  render(<App store={store} bridge={kernel.bridge} />);
+  await kernel.load();
+
+  await user.click(screen.getByRole("button", { name: "自定义" }));
+  const dialog = await screen.findByRole("dialog", { name: "自定义模型" });
+  // The stub catalog's provider is dsanthropic; typing that id explicitly
+  // trips the warning (R2 — the merge rule would overwrite silently).
+  await user.type(within(dialog).getByLabelText("接口地址"), "https://api.example.com/v1");
+  await user.type(within(dialog).getByLabelText("provider id（选填）"), "dsanthropic");
+  expect(
+    await within(dialog).findByText("已存在同名 provider，保存将覆盖它的声明（密钥另行管理，不受影响）。"),
+  ).toBeTruthy();
 });

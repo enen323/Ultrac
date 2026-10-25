@@ -29,6 +29,7 @@
 
 import {
   CmdAbort,
+  CmdAddCustomModel,
   CmdClearQueue,
   CmdCompact,
   CmdFork,
@@ -54,6 +55,8 @@ import {
 } from "./transcript.ts";
 import type {
   CompactResult,
+  CustomModelResult,
+  CustomModelSpec,
   ForkMessage,
   ForkResult,
   RpcEvent,
@@ -299,6 +302,32 @@ export class SessionStore {
       const result = await callData<ForkResult>(this.#bridge, { type: CmdFork, entryId });
       await this.#reloadTranscript();
       await this.#refreshState();
+      return result;
+    });
+  }
+
+  /**
+   * Add a custom model (custom-model-plan.md D3): the kernel writes the
+   * credential to auth.json, the declaration to models.json — both at
+   * the user layer, which is cwd-independent (D8) — reloads, and answers
+   * with the fresh catalog.
+   *
+   * The response is the whole merged catalog, so the picker's source of
+   * truth becomes the kernel's in one patch: the new model is selectable
+   * immediately, without a restart and without a second round trip (D4).
+   * The thinking levels are left alone — a model switch refetches them,
+   * and the added model has not been selected yet.
+   *
+   * null when the kernel refused (its message is in actionError, which
+   * the dialog shows as its error bar while it is open).
+   */
+  async addCustomModel(spec: CustomModelSpec): Promise<CustomModelResult | null> {
+    return this.#act(async () => {
+      const result = await callData<CustomModelResult>(this.#bridge, {
+        type: CmdAddCustomModel,
+        ...spec,
+      });
+      this.#patch({ models: result.models ?? [] });
       return result;
     });
   }
