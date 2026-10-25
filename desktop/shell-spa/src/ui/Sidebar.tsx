@@ -51,9 +51,7 @@ export function Sidebar({ sessions, currentPath, onResume, onNew, theme, onCycle
               onClick={() => onResume(session.path)}
             >
               <span className="title">{session.name?.trim() || session.title}</span>
-              <span className="meta">
-                {relativeTime(session.timestamp)} · {session.messageCount} 条
-              </span>
+              <span className="meta">{relativeTime(session.timestamp)}</span>
             </button>
           ))
         )}
