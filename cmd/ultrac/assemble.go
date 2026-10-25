@@ -37,12 +37,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"ultrac/internal/agent"
 	"ultrac/internal/ai"
 	"ultrac/internal/compact"
 	"ultrac/internal/config"
+	"ultrac/internal/config/auth"
 	"ultrac/internal/logging"
 	"ultrac/internal/models"
 	"ultrac/internal/prompt"
@@ -59,31 +61,25 @@ type harness struct {
 	flags *agentFlags
 	cwd   string
 
-	mgr       *session.SessionManager
-	seed      session.SessionContext
-	model     ai.Model
-	tools     []agent.Tool
-	effective map[string]string
+	mgr   *session.SessionManager
+	seed  session.SessionContext
+	model ai.Model
+	tools []agent.Tool
 
-	// credential resolves the API key for one provider. It is the
-	// per-provider chain (models.json apiKey → auth.json, plan §4.6)
-	// with the settings env block's token as the last-resort fallback —
-	// the chain itself never reads env (D6); the env block reaches the
-	// wire through its own pre-P3 path, which the fallback preserves.
-	// Every consumer goes through it with the CURRENT model's provider:
-	// the agent loop (GetAPIKey), the compactor's summary request, and
-	// the startup fail-fast.
-	credential func(provider string) string
+	// cfg is the reloadable half of the harness (custom-model-plan.md
+	// D4): the merged model catalog, the credential stack and the
+	// settings env fallback in one atomically-swappable value.
+	// reloadModels — the second half of add_custom_model — publishes a
+	// fresh one after the files change, and every reader takes one
+	// consistent snapshot of all four fields: never a models.json from
+	// before a write next to an auth.json from after it (R5).
+	cfg atomic.Pointer[resolvedConfig]
 
 	// resolver is kept so the RPC layer can persist settings changes
 	// (set_auto_compaction) through the same read-modify-write cycle the
-	// startup resolution used.
+	// startup resolution used — and so reloadModels can re-read the
+	// settings layers.
 	resolver *config.FileResolver
-	// snapshot is the merged model catalog (built-in + both models.json
-	// layers). Every model resolution and every availableModels list goes
-	// through it, so a models.json entry is visible everywhere the
-	// handwritten catalog used to be the only source.
-	snapshot *models.Snapshot
 	// compaction is the resolved compaction configuration (settings
 	// section + engine defaults). newAgent hands it to every compactor it
 	// builds.
@@ -101,6 +97,26 @@ type harness struct {
 	// streamFn overrides the provider registry. Nil in production; tests
 	// inject a fake so no request leaves the process.
 	streamFn agent.StreamFn
+}
+
+// resolvedConfig is what reloadModels replaces wholesale (plan D4): the
+// four values the add_custom_model flow can change on disk while the
+// process runs. It is immutable once built — a reload computes a new one
+// and swaps the pointer, so no reader ever observes a half-update.
+type resolvedConfig struct {
+	// snapshot is the merged model catalog (built-in + both models.json
+	// layers). Every model resolution and every availableModels list goes
+	// through it, so a models.json entry is visible everywhere the
+	// handwritten catalog used to be the only source.
+	snapshot *models.Snapshot
+	// authStack is the merged credential view (both auth.json layers).
+	authStack *auth.Stack
+	// effective is the settings env block (the last-resort credential
+	// fallback and the model/baseUrl conventions).
+	effective map[string]string
+	// envToken is the settings env block's token, precomputed because
+	// credentialFor reads it on every request.
+	envToken string
 }
 
 // buildHarness assembles the stack. A non-zero return is the exit code;
@@ -191,34 +207,85 @@ func buildHarness(f *agentFlags, cwd string, stderr io.Writer, streamFn agent.St
 	// neither still authenticates the way it did before the chain
 	// existed (D6).
 	envToken := settingsEnvToken(effective)
-	credential := func(provider string) string {
-		if key := resolveCredential(snapshot, authStack, provider); key != "" {
-			return key
-		}
-		return envToken
-	}
-	if credential(string(model.Provider)) == "" {
-		noCredentialGuidance(stderr, string(model.Provider))
-		return nil, 1
-	}
 
 	// -- 4. Tools ------------------------------------------------------------
 	tools := tool.All(cwd)
 
-	return &harness{
+	h := &harness{
 		flags:      f,
 		cwd:        cwd,
 		mgr:        mgr,
 		seed:       seed,
 		model:      model,
 		tools:      tools,
-		credential: credential,
-		effective:  effective,
 		resolver:   r,
-		snapshot:   snapshot,
 		compaction: compaction,
 		streamFn:   streamFn,
-	}, 0
+	}
+	h.cfg.Store(&resolvedConfig{
+		snapshot:  snapshot,
+		authStack: authStack,
+		effective: effective,
+		envToken:  envToken,
+	})
+	// The fail-fast reads through the same resolver the agent loop calls
+	// per request, so what it checks is what requests will get.
+	if h.credentialFor(string(model.Provider)) == "" {
+		noCredentialGuidance(stderr, string(model.Provider))
+		return nil, 1
+	}
+	return h, 0
+}
+
+// credentialFor resolves the API key for one provider: the per-provider
+// chain (models.json apiKey → auth.json, plan §4.6) with the settings
+// env block's token as the last-resort fallback — the chain itself never
+// reads env (D6); the env block reaches the wire through its own pre-P3
+// path, which the fallback preserves.
+//
+// It reads the current resolvedConfig on every call instead of capturing
+// values at startup (plan D4): reloadModels swaps the pointer after an
+// add_custom_model write, and the agent loop calls GetAPIKey once per
+// request (internal/agent/loop.go), so a credential added mid-session is
+// live for the next request without touching the loop (F8). Every
+// consumer goes through it with the CURRENT model's provider: the agent
+// loop (GetAPIKey), the compactor's summary request, and the startup
+// fail-fast.
+func (h *harness) credentialFor(provider string) string {
+	cfg := h.cfg.Load()
+	if key := resolveCredential(cfg.snapshot, cfg.authStack, provider); key != "" {
+		return key
+	}
+	return cfg.envToken
+}
+
+// reloadModels re-reads everything the add_custom_model flow can have
+// changed on disk — both models.json layers, both auth.json layers, and
+// the settings layers the env fallback comes from — and publishes the
+// result as one new resolvedConfig (plan D4). Compute-then-swap: no
+// reader ever sees a half-updated config, and an in-flight request keeps
+// the snapshot it started with, finishing with the old key while the
+// next one uses the new (R6).
+//
+// Layer problems degrade exactly as they do at startup: a broken file is
+// a warning, not a failure — the reload keeps whatever loaded. The
+// warnings are dropped here because the startup pass already printed
+// them and the RPC mode's stderr is the client's diagnostics channel;
+// the errors that do propagate are the ones that leave the harness
+// unable to resolve anything at all.
+func (h *harness) reloadModels() error {
+	layers, err := h.resolver.Layers(context.Background(), h.cwd)
+	if err != nil {
+		return fmt.Errorf("reload settings layers: %w", err)
+	}
+	effective := config.EffectiveEnv(layers)
+	h.cfg.Store(&resolvedConfig{
+		snapshot:  loadModelSnapshot(h.cwd, io.Discard),
+		authStack: loadAuthStack(h.cwd, io.Discard),
+		effective: effective,
+		envToken:  settingsEnvToken(effective),
+	})
+	return nil
 }
 
 // noCredentialGuidance is the startup fail-fast for a model whose
@@ -323,14 +390,16 @@ func (h *harness) newAgent(mgr *session.SessionManager, seed session.SessionCont
 			initial.ThinkingLevel = &level
 		}
 	}
-	compactor := newCompactor(mgr, h.compaction, h.credential, h.streamFn, h.emitEvent)
+	compactor := newCompactor(mgr, h.compaction, h.credentialFor, h.streamFn, h.emitEvent)
 	a := agent.NewAgent(agent.AgentOptions{
 		InitialState: initial,
 		// The provider parameter is real now (P3): the loop resolves the
 		// credential per request with the CURRENT model's provider, so a
 		// set_model or a resume to another provider authenticates with
-		// that provider's chain entry.
-		GetAPIKey:      h.credential,
+		// that provider's chain entry. The method value reads the live
+		// resolvedConfig, so a mid-session reloadModels (add_custom_model)
+		// is visible to the next request (D4).
+		GetAPIKey:      h.credentialFor,
 		SessionID:      mgr.SessionID(),
 		StreamFn:       h.streamFn,
 		PrepareRequest: compactor.prepareRequest,
@@ -383,12 +452,17 @@ func (h *harness) buildPrompt(a *agent.Agent, text string, images []rpc.ImageCon
 // pi's model runtime snapshot works the same way (rpc-mode.ts:471,
 // getAvailableSnapshot) — a model the settings name is selectable even
 // when the catalog has not caught up with the provider's lineup.
+//
+// The snapshot is read from the live resolvedConfig, so an
+// add_custom_model's reloadModels is visible here immediately (F6 — the
+// reason the reload exists at all).
 func (h *harness) availableModels() []ai.Model {
+	cfg := h.cfg.Load()
 	out := ai.Catalog()
-	if h.snapshot != nil {
-		out = h.snapshot.Catalog()
+	if cfg.snapshot != nil {
+		out = cfg.snapshot.Catalog()
 	}
-	if m, err := resolveModel(h.snapshot, "", "", h.effective); err == nil && !containsModel(out, m) {
+	if m, err := resolveModel(cfg.snapshot, "", "", cfg.effective); err == nil && !containsModel(out, m) {
 		out = append(out, m)
 	}
 	return out

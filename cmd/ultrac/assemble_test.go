@@ -118,7 +118,8 @@ func TestAvailableModelsIncludeSettingsModel(t *testing.T) {
 	// The settings-resolved model must be selectable even when the
 	// handwritten catalog has not caught up (pi's model runtime snapshot
 	// works the same way, rpc-mode.ts:471).
-	resolved, err := resolveModel(h.snapshot, "", "", h.effective)
+	cfg := h.cfg.Load()
+	resolved, err := resolveModel(cfg.snapshot, "", "", cfg.effective)
 	if err != nil {
 		t.Fatalf("resolveModel: %v", err)
 	}
@@ -163,24 +164,24 @@ func TestHarnessCredentialResolvesPerProvider(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("buildHarness exit = %d, want 0", code)
 	}
-	if h.credential == nil {
-		t.Fatal("the harness must carry a credential resolver (P3)")
+	if h.cfg.Load() == nil {
+		t.Fatal("the harness must carry a resolved config (P3/D4)")
 	}
-	if got := h.credential("from-models"); got != "sk-models" {
-		t.Errorf("credential(from-models) = %q, want the models.json key", got)
+	if got := h.credentialFor("from-models"); got != "sk-models" {
+		t.Errorf("credentialFor(from-models) = %q, want the models.json key", got)
 	}
-	if got := h.credential("from-auth"); got != "sk-auth" {
-		t.Errorf("credential(from-auth) = %q, want the auth.json key", got)
+	if got := h.credentialFor("from-auth"); got != "sk-auth" {
+		t.Errorf("credentialFor(from-auth) = %q, want the auth.json key", got)
 	}
-	if got := h.credential("deepseek"); got != "sk-env-token" {
-		t.Errorf("credential(deepseek) = %q, want the settings env token (the unaffected path)", got)
+	if got := h.credentialFor("deepseek"); got != "sk-env-token" {
+		t.Errorf("credentialFor(deepseek) = %q, want the settings env token (the unaffected path)", got)
 	}
-	if got := h.credential("nobody"); got != "sk-env-token" {
-		t.Errorf("credential(nobody) = %q, want the settings env token", got)
+	if got := h.credentialFor("nobody"); got != "sk-env-token" {
+		t.Errorf("credentialFor(nobody) = %q, want the settings env token", got)
 	}
 	// The startup model resolved through the same resolver, so the
 	// fail-fast below could not have fired with these files present.
-	if got := h.credential(string(h.model.Provider)); got == "" {
+	if got := h.credentialFor(string(h.model.Provider)); got == "" {
 		t.Error("the startup model's provider must resolve to a credential")
 	}
 }

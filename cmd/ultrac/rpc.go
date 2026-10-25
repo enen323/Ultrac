@@ -29,12 +29,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"ultrac/internal/agent"
 	"ultrac/internal/ai"
 	"ultrac/internal/config"
+	"ultrac/internal/config/auth"
+	"ultrac/internal/models"
 	"ultrac/internal/rpc"
 	"ultrac/internal/session"
 	"ultrac/internal/transport"
@@ -54,6 +57,13 @@ type rpcHost struct {
 	mu    sync.Mutex
 	agent *agent.Agent
 	mgr   *session.SessionManager
+
+	// addMu serializes AddCustomModel's read-modify-write sequence: two
+	// concurrent writes (a double-submitted dialog) would otherwise
+	// read-modify-write the same file from a stale base and lose one of
+	// the two providers. The files' own atomicity covers a crash, not a
+	// race between two callers.
+	addMu sync.Mutex
 }
 
 // newRPCHost builds the host and its initial agent/session pair.
@@ -184,7 +194,10 @@ func (host *rpcHost) ResumeSession(path string) error {
 	}
 	seed := mgr.BuildSessionContext()
 	if seed.Model != nil {
-		if m, err := resolveModel(host.h.snapshot, seed.Model.Provider+"/"+seed.Model.ModelID, host.h.flags.API, host.h.effective); err == nil &&
+		// The snapshot the resume resolves against is the live one: an
+		// add_custom_model may have replaced it since startup (D4).
+		cfg := host.h.cfg.Load()
+		if m, err := resolveModel(cfg.snapshot, seed.Model.Provider+"/"+seed.Model.ModelID, host.h.flags.API, cfg.effective); err == nil &&
 			containsModel(host.h.availableModels(), m) {
 			host.h.model = m
 		}
@@ -205,8 +218,8 @@ func (host *rpcHost) ResumeSession(path string) error {
 // it to the agent, and persists a model_change entry (pi:
 // agent-session.ts:2502-2514). pi also re-checks the provider credential
 // here; this port resolves credentials per request through the chain
-// (assemble.go's h.credential — models.json apiKey → auth.json, then the
-// settings env token), so a switch to a provider without a credential
+// (assemble.go's h.credentialFor — models.json apiKey → auth.json, then
+// the settings env token), so a switch to a provider without a credential
 // surfaces at the next request as an endpoint error, not here.
 func (host *rpcHost) SetModel(provider, modelID string) (ai.Model, error) {
 	var found ai.Model
@@ -312,6 +325,123 @@ func (host *rpcHost) SetAutoCompaction(enabled bool) error {
 func (host *rpcHost) IsCompacting() bool { return host.h.compactor.IsCompacting() }
 
 func (host *rpcHost) AutoCompactionEnabled() bool { return host.h.compactor.AutoEnabled() }
+
+// AddCustomModel writes a user-declared provider end to end and answers
+// with the fresh catalog (custom-model-plan.md D3: one command, one user
+// intent — write the credential, write the declaration, reload, answer).
+//
+// The order is D7: auth.json first, models.json second, never rolled
+// back. A failure between the two leaves an orphan credential — visible
+// to `ultrac config`, harmless — instead of a model nothing can
+// authenticate, which would fail the next launch's fail-fast.
+//
+// Both files are written at the user layer (ConfigHome), which is
+// cwd-independent (D8): the model survives the desktop being opened from
+// any directory. The layer choice is therefore not a parameter — the
+// spec carries no source field, and the project layer stays the user's
+// to own by hand.
+//
+// The reload is what makes the model usable without a restart (D4): the
+// agent loop resolves credentials per request through h.credentialFor,
+// which reads the pointer this swaps, so the next request — and the next
+// set_model — already sees the new provider (R6: an in-flight request
+// keeps the snapshot it started with).
+func (host *rpcHost) AddCustomModel(spec rpc.CustomModelSpec) (rpc.AddCustomModelResult, error) {
+	host.addMu.Lock()
+	defer host.addMu.Unlock()
+
+	// The protocol layer validated the command already; this is the same
+	// rules on the host's own entry point (the P6 test calls here
+	// directly), from one source of truth.
+	if err := rpc.ValidateCustomModelSpec(spec); err != nil {
+		return rpc.AddCustomModelResult{}, err
+	}
+
+	// D1: the key goes to auth.json and never into models.json — the
+	// chain's first step reads models.json's apiKey, and a key left
+	// there would shadow an auth.json edit forever after.
+	authPath := filepath.Join(config.ConfigHome(), "auth.json")
+	if err := auth.Update(authPath, spec.Provider, spec.APIKey, false); err != nil {
+		return rpc.AddCustomModelResult{}, fmt.Errorf("write auth.json: %w", err)
+	}
+
+	modelsPath := filepath.Join(config.ConfigHome(), "models.json")
+	cfg, err := models.Load(modelsPath)
+	if err != nil {
+		return rpc.AddCustomModelResult{}, fmt.Errorf("read models.json: %w", err)
+	}
+	upsertCustomProvider(&cfg, spec)
+	if err := models.Save(modelsPath, cfg); err != nil {
+		return rpc.AddCustomModelResult{}, fmt.Errorf("write models.json: %w", err)
+	}
+
+	if err := host.h.reloadModels(); err != nil {
+		return rpc.AddCustomModelResult{}, err
+	}
+	return customModelCatalog(host.h.cfg.Load().snapshot), nil
+}
+
+// upsertCustomProvider merges the spec into a models.json config: the
+// provider entry gains the baseUrl and the dialect (an existing entry's
+// values win — the user may have tuned them by hand), and the model
+// definition replaces a matching id wholesale or appends, exactly the
+// upsert rule merge.go applies at load time. The apiKey is deliberately
+// absent (D1); a name-less definition falls back to the id, which is
+// what modelFromJSON does with the same omission.
+func upsertCustomProvider(cfg *models.Config, spec rpc.CustomModelSpec) {
+	if cfg.Providers == nil {
+		cfg.Providers = map[string]models.ProviderConfig{}
+	}
+	entry := cfg.Providers[spec.Provider]
+	if entry.BaseURL == "" {
+		entry.BaseURL = spec.BaseURL
+	}
+	if entry.API == "" {
+		entry.API = spec.API
+	}
+	def := models.ModelDefinition{
+		ID:            spec.ModelID,
+		ContextWindow: &spec.ContextWindow,
+		MaxTokens:     &spec.MaxTokens,
+	}
+	if spec.ModelName != "" {
+		def.Name = spec.ModelName
+	}
+	for i, existing := range entry.Models {
+		if existing.ID != def.ID {
+			continue
+		}
+		if def.Name == "" {
+			def.Name = existing.Name // a re-save keeps the display name
+		}
+		entry.Models[i] = def
+		cfg.Providers[spec.Provider] = entry
+		return
+	}
+	entry.Models = append(entry.Models, def)
+	cfg.Providers[spec.Provider] = entry
+}
+
+// customModelCatalog builds add_custom_model's response from the fresh
+// snapshot: the whole merged catalog — the picker patches from it, no
+// second round trip — plus every provider a models.json file declares.
+// Built-in-only providers are absent: nothing was declared for them.
+func customModelCatalog(snap *models.Snapshot) rpc.AddCustomModelResult {
+	out := rpc.AddCustomModelResult{Models: snap.Catalog()}
+	for _, p := range snap.Providers() {
+		cfg, ok := snap.ProviderConfig(p)
+		if !ok {
+			continue
+		}
+		out.Providers = append(out.Providers, rpc.CustomModelProviderInfo{
+			ID:       string(p),
+			BaseURL:  providerBaseURL(snap, p, cfg),
+			API:      providerAPI(snap, p, cfg),
+			ModelIDs: providerModelIDs(snap, p),
+		})
+	}
+	return out
+}
 
 // Fork moves the session leaf to branch from entryID (plan D7: pi's
 // navigateTree without the summary, agent-session.ts:4113-4128).

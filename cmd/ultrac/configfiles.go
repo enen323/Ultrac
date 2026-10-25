@@ -167,6 +167,32 @@ func providerModelCount(snap *models.Snapshot, provider ai.ProviderId) int {
 	return n
 }
 
+// providerAPI names the dialect in play for a declared provider: the
+// entry's own api when it sets one, else the first catalog entry's —
+// the same fallback chain modelFromJSON resolved with. add_custom_model
+// shows it under "已添加".
+func providerAPI(snap *models.Snapshot, provider ai.ProviderId, cfg models.ProviderConfig) string {
+	if cfg.API != "" {
+		return cfg.API
+	}
+	if m, ok := snap.DefaultModel(provider); ok {
+		return string(m.API)
+	}
+	return ""
+}
+
+// providerModelIDs lists the merged catalog ids for a provider — what
+// the picker will actually offer for it.
+func providerModelIDs(snap *models.Snapshot, provider ai.ProviderId) []string {
+	var out []string
+	for _, m := range snap.Catalog() {
+		if m.Provider == provider {
+			out = append(out, m.ID)
+		}
+	}
+	return out
+}
+
 // credentialSource names where the provider's key comes from — the
 // chain's order made visible (plan §4.7).
 func credentialSource(cfg models.ProviderConfig, stack *auth.Stack, provider string) string {
