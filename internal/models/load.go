@@ -253,6 +253,24 @@ func Load(path string) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("failed to load models.json: %w\n\nFile: %s", err, path)
 	}
+	cfg, err := Parse(raw)
+	if err != nil {
+		// The trailer names the file — Parse's own wording is
+		// file-agnostic (write.go's self-check has no path to blame).
+		return Config{}, fmt.Errorf("%w\n\nFile: %s", err, path)
+	}
+	return cfg, nil
+}
+
+// Parse decodes and schema-validates one models.json document: the file's
+// bytes, BOM tolerated. It is Load's body without the file — same
+// parse-then-validate-then-decode chain, same error wording minus the
+// "File: <path>" trailer.
+//
+// write.go's Save uses it as its self-check: a Config that does not
+// round-trip through Parse is a returned error, never a document on disk
+// the next launch warns about (plan P1).
+func Parse(raw []byte) (Config, error) {
 	raw = stripBOM(raw)
 
 	// Validate the document as generic JSON first: jsonschema's decoder
@@ -260,10 +278,10 @@ func Load(path string) (Config, error) {
 	// as json.Number), and it doubles as the parse check.
 	value, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
 	if err != nil {
-		return Config{}, fmt.Errorf("failed to parse models.json: %w\n\nFile: %s", err, path)
+		return Config{}, fmt.Errorf("failed to parse models.json: %w", err)
 	}
 	if err := validate(value); err != nil {
-		return Config{}, fmt.Errorf("invalid models.json schema:\n%s\n\nFile: %s", err, path)
+		return Config{}, fmt.Errorf("invalid models.json schema:\n%s", err)
 	}
 
 	var cfg Config
@@ -271,7 +289,7 @@ func Load(path string) (Config, error) {
 		// Unreachable in practice: the schema check above already parsed
 		// the same bytes. Kept so a decoder/validator disagreement is a
 		// named error rather than a silently empty config.
-		return Config{}, fmt.Errorf("failed to parse models.json: %w\n\nFile: %s", err, path)
+		return Config{}, fmt.Errorf("failed to parse models.json: %w", err)
 	}
 	return cfg, nil
 }
