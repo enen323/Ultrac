@@ -81,6 +81,12 @@ type RpcCommand struct {
 	ModelName     string `json:"modelName,omitempty"`
 	ContextWindow *int   `json:"contextWindow,omitempty"`
 	MaxTokens     *int   `json:"maxTokens,omitempty"`
+	// ThinkingLevels is the set of thinking levels the new model supports
+	// (low / medium / high — the dialog's checkboxes). Absent or empty
+	// means "not a reasoning model"; there is deliberately no scalar
+	// "highest level" form, because a provider may offer high without
+	// medium (custom-model-thinking-limits-plan.md D1).
+	ThinkingLevels []string `json:"thinkingLevels,omitempty"`
 
 	// set_thinking_level
 	Level string `json:"level,omitempty"`
@@ -278,6 +284,15 @@ type CustomModelSpec struct {
 	// non-positive values.
 	ContextWindow int
 	MaxTokens     int
+	// ThinkingLevels is the set of levels the model supports, as ticked
+	// in the dialog: each element is "low", "medium" or "high", and an
+	// empty slice means "no reasoning" — the host then writes neither
+	// reasoning nor thinkingLevelMap, so a non-reasoning declaration
+	// stays byte-identical to the one this flow wrote before the levels
+	// existed (D2). Unselected levels are written as explicit nulls by
+	// the host, because a level merely absent from thinkingLevelMap
+	// counts as SUPPORTED (ai.SupportedThinkingLevels).
+	ThinkingLevels []string
 }
 
 // CustomModelProviderInfo is one provider in add_custom_model's

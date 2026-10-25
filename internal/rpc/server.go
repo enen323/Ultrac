@@ -762,14 +762,15 @@ const (
 
 func (s *Server) cmdAddCustomModel(cmd RpcCommand) RpcResponse {
 	spec := CustomModelSpec{
-		Provider:      strings.TrimSpace(cmd.Provider),
-		BaseURL:       strings.TrimSpace(cmd.BaseURL),
-		APIKey:        cmd.APIKey,
-		API:           strings.TrimSpace(cmd.API),
-		ModelID:       strings.TrimSpace(cmd.ModelID),
-		ModelName:     strings.TrimSpace(cmd.ModelName),
-		ContextWindow: defaultContextWindow,
-		MaxTokens:     defaultMaxTokens,
+		Provider:       strings.TrimSpace(cmd.Provider),
+		BaseURL:        strings.TrimSpace(cmd.BaseURL),
+		APIKey:         cmd.APIKey,
+		API:            strings.TrimSpace(cmd.API),
+		ModelID:        strings.TrimSpace(cmd.ModelID),
+		ModelName:      strings.TrimSpace(cmd.ModelName),
+		ContextWindow:  defaultContextWindow,
+		MaxTokens:      defaultMaxTokens,
+		ThinkingLevels: cmd.ThinkingLevels,
 	}
 	if cmd.ContextWindow != nil {
 		spec.ContextWindow = *cmd.ContextWindow
@@ -796,7 +797,8 @@ func (s *Server) cmdAddCustomModel(cmd RpcCommand) RpcResponse {
 // malformed rather than the write failing: the required ones, the
 // baseUrl's shape, the provider id's fitness as a models.json key (it is
 // also set_model's "provider/" part — a "/" in it would be
-// unselectable), and the dialect (only the two registered ones, F2).
+// unselectable), the dialect (only the two registered ones, F2), and the
+// thinking levels (only the three the dialog offers).
 //
 // It is exported because the host runs the same rules on its own entry
 // point (cmd/ultrac's AddCustomModel): a direct caller — the P6
@@ -827,6 +829,21 @@ func ValidateCustomModelSpec(spec CustomModelSpec) error {
 	default:
 		return fmt.Errorf("api %q is not a supported dialect (want %q or %q)",
 			spec.API, ai.APIOpenAICompletions, ai.APIAnthropicMessages)
+	}
+	// The dialog offers exactly three levels, so anything else is a
+	// malformed command rather than a capability the host should try to
+	// honour — "xhigh"/"max" are provider opt-ins the form does not
+	// expose, and a typo ("HIGH", " high") would otherwise be written
+	// into thinkingLevelMap as an unknown key that no clamp ever reads.
+	// Duplicates are not an error: the map the host builds is keyed by
+	// level, so a repeated level collapses on its own (plan D10).
+	for i, level := range spec.ThinkingLevels {
+		switch level {
+		case string(ai.ModelThinkLow), string(ai.ModelThinkMedium), string(ai.ModelThinkHigh):
+		default:
+			return fmt.Errorf("thinkingLevels[%d] %q is not one of %q, %q, %q",
+				i, level, ai.ModelThinkLow, ai.ModelThinkMedium, ai.ModelThinkHigh)
+		}
 	}
 	if spec.ContextWindow <= 0 {
 		return fmt.Errorf("contextWindow must be > 0")

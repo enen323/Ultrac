@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1383,6 +1384,94 @@ func TestAddCustomModelValidationFailures(t *testing.T) {
 			// A malformed command never reaches the host: the write
 			// side is not a validator, and half-writing a provider
 			// from a bad command is the failure D7 warns about.
+			if len(h.addCalls) != 0 {
+				t.Errorf("host calls = %v, want none for a malformed command", h.addCalls)
+			}
+		})
+	}
+}
+
+// TestAddCustomModelThinkingLevels — the dialog's checkboxes reach the host
+// as a set, and only the three levels the form offers are accepted.
+// custom-model-thinking-limits-plan.md D1/D3.
+func TestAddCustomModelThinkingLevels(t *testing.T) {
+	// Each accepted set arrives verbatim, in the order the client sent it:
+	// the protocol must not re-implement the host's map construction.
+	for _, levels := range [][]string{
+		{"low"},
+		{"high"},
+		{"low", "high"},
+		{"low", "medium", "high"},
+	} {
+		h := newTestHost(t)
+		h.addResult = &AddCustomModelResult{}
+		fields := validCustomModelFields()
+		fields["id"] = "m-" + strings.Join(levels, "-")
+		fields["thinkingLevels"] = levels
+		if r := response(t, h.serve(t, cmd("add_custom_model", fields)), "add_custom_model"); r["success"] != true {
+			t.Fatalf("thinkingLevels %v = %v", levels, r)
+		}
+		if got := h.addCalls[0].ThinkingLevels; !slices.Equal(got, levels) {
+			t.Errorf("spec.thinkingLevels = %v, want %v", got, levels)
+		}
+	}
+
+	// Absent and empty are the same thing: "no reasoning". Both must be
+	// accepted — an old client that knows nothing about levels sends
+	// neither, and the dialog sends an empty array when nothing is
+	// ticked (D2).
+	for _, fields := range []map[string]any{
+		{},
+		{"thinkingLevels": []string{}},
+	} {
+		h := newTestHost(t)
+		h.addResult = &AddCustomModelResult{}
+		base := validCustomModelFields()
+		base["id"] = "m-none"
+		for k, v := range fields {
+			base[k] = v
+		}
+		if r := response(t, h.serve(t, cmd("add_custom_model", base)), "add_custom_model"); r["success"] != true {
+			t.Fatalf("no levels = %v", r)
+		}
+		if got := h.addCalls[0].ThinkingLevels; len(got) != 0 {
+			t.Errorf("spec.thinkingLevels = %v, want empty for a non-reasoning model", got)
+		}
+	}
+}
+
+// TestAddCustomModelRejectsUnknownThinkingLevels — "xhigh"/"max" are
+// provider opt-ins the form does not expose, and a case or whitespace typo
+// would land in thinkingLevelMap as a key no clamp ever reads. The command
+// is malformed, so the host is never called.
+func TestAddCustomModelRejectsUnknownThinkingLevels(t *testing.T) {
+	cases := []struct {
+		name   string
+		levels []string
+		want   string
+	}{
+		{name: "xhigh", levels: []string{"xhigh"}, want: `thinkingLevels[0] "xhigh" is not one of`},
+		{name: "max", levels: []string{"max"}, want: `thinkingLevels[0] "max" is not one of`},
+		{name: "minimal", levels: []string{"minimal"}, want: `thinkingLevels[0] "minimal" is not one of`},
+		{name: "off", levels: []string{"off"}, want: `thinkingLevels[0] "off" is not one of`},
+		{name: "uppercase", levels: []string{"HIGH"}, want: `thinkingLevels[0] "HIGH" is not one of`},
+		{name: "empty element", levels: []string{"high", ""}, want: `thinkingLevels[1] "" is not one of`},
+		{name: "untrimmed", levels: []string{"high "}, want: `thinkingLevels[0] "high " is not one of`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHost(t)
+			h.addResult = &AddCustomModelResult{}
+			fields := validCustomModelFields()
+			fields["id"] = "bad-levels"
+			fields["thinkingLevels"] = tc.levels
+			r := response(t, h.serve(t, cmd("add_custom_model", fields)), "add_custom_model")
+			if r["success"] != false {
+				t.Fatalf("success = %v, want false: %v", r["success"], r)
+			}
+			if got, _ := r["error"].(string); !strings.Contains(got, tc.want) {
+				t.Errorf("error = %q, want it to contain %q", got, tc.want)
+			}
 			if len(h.addCalls) != 0 {
 				t.Errorf("host calls = %v, want none for a malformed command", h.addCalls)
 			}
