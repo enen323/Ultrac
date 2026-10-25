@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"ultrac/internal/models"
 )
 
 // Source is one layer of the settings stack.
@@ -49,12 +51,12 @@ func (s Source) String() string {
 
 // Settings is the shape of a settings file.
 //
-// Only Env and Compaction are typed. That is not laziness about scope — it is
-// a statement about who owns the file. ~/.ultrac/settings.json is read by the
-// TypeScript implementation too, and a struct with forty typed fields would
-// silently drop the thirty-eight this version has never heard of on write. So
-// unknown sections live in Extra, verbatim, and survive a read-modify-write
-// cycle.
+// Only Env, Compaction and Providers are typed. That is not laziness about
+// scope — it is a statement about who owns the file. ~/.ultrac/settings.json is
+// read by the TypeScript implementation too, and a struct with forty typed
+// fields would silently drop the thirty-eight this version has never heard of on
+// write. So unknown sections live in Extra, verbatim, and survive a
+// read-modify-write cycle.
 //
 // A writer is only correct here because of Extra. Remove it and the first
 // `/provider` run on a machine with hooks configured deletes the hooks block.
@@ -67,6 +69,18 @@ type Settings struct {
 	// the truth about what the files say (docs/compaction-branch-plan.md
 	// D6).
 	Compaction *CompactionSettings `json:"compaction,omitempty"`
+
+	// Providers is the typed model-provider section: every declared
+	// provider's baseUrl, dialect, credential and model list, which used to
+	// live in models.json + auth.json
+	// (docs/开发计划/新功能计划/settings-unify-plan.md).
+	//
+	// It is the ONE place a request's connection information comes from, and
+	// it is only honoured from the user layer — a project settings file that
+	// declares providers is reported and ignored, because that file is
+	// committed to git and a credential in it is an unrecoverable leak
+	// (plan D4).
+	Providers map[string]models.ProviderConfig `json:"providers,omitempty"`
 
 	// Extra holds every other top-level key, preserved byte-for-byte as JSON.
 	// Marshalling merges Extra and Env into one object; see MarshalJSON.
@@ -92,15 +106,32 @@ type CompactionSettings struct {
 // compaction are the two carve-outs; everything else is Extra.
 const compactionKey = "compaction"
 
-// UnmarshalJSON splits a settings document into Env, Compaction and Extra.
+// providersKey is the top-level key the model-provider section occupies —
+// the third carve-out, and the one that replaced models.json + auth.json
+// (settings-unify-plan.md).
+const providersKey = "providers"
+
+// typedKey reports whether k is owned by a typed field rather than Extra.
+// One list, so UnmarshalJSON, MarshalJSON, Get and Set cannot disagree about
+// which keys are special.
+func typedKey(k string) bool {
+	switch k {
+	case "env", compactionKey, providersKey:
+		return true
+	}
+	return false
+}
+
+// UnmarshalJSON splits a settings document into Env, Compaction, Providers and
+// Extra.
 //
 // A malformed "env" block is not fatal: it lands in Extra instead, so the rest
 // of the file still loads and the user sees a validation error rather than an
 // empty configuration. Losing every hook because one env value was a number is
-// the worse failure. The same rule governs "compaction": a section that does
-// not decode into CompactionSettings (wrong shape, non-integer tokens) is
-// parked in Extra byte-for-byte rather than dropped, so a write cannot destroy
-// what the user was trying to fix.
+// the worse failure. The same rule governs "compaction" and "providers": a
+// section that does not decode into its typed shape is parked in Extra
+// byte-for-byte rather than dropped, so a write cannot destroy what the user
+// was trying to fix.
 func (s *Settings) UnmarshalJSON(data []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -109,27 +140,25 @@ func (s *Settings) UnmarshalJSON(data []byte) error {
 
 	s.Extra = make(map[string]json.RawMessage, len(raw))
 	for k, v := range raw {
-		if k == "env" || k == compactionKey {
+		if typedKey(k) {
 			continue
 		}
 		s.Extra[k] = v
 	}
 
 	s.Env = nil
-	envRaw, ok := raw["env"]
-	if !ok {
-		s.Compaction = decodeCompaction(raw[compactionKey], s)
-		return nil
+	if envRaw, ok := raw["env"]; ok {
+		var env map[string]string
+		if err := json.Unmarshal(envRaw, &env); err == nil {
+			s.Env = env
+		} else {
+			// Not a map[string]string. Keep it so a write cannot lose it.
+			s.Extra["env"] = envRaw
+		}
 	}
-	var env map[string]string
-	if err := json.Unmarshal(envRaw, &env); err == nil {
-		s.Env = env
-		s.Compaction = decodeCompaction(raw[compactionKey], s)
-		return nil
-	}
-	// Not a map[string]string. Keep it so a write cannot lose it.
-	s.Extra["env"] = envRaw
+
 	s.Compaction = decodeCompaction(raw[compactionKey], s)
+	s.Providers = decodeProviders(raw[providersKey], s)
 	return nil
 }
 
@@ -150,6 +179,32 @@ func decodeCompaction(raw json.RawMessage, s *Settings) *CompactionSettings {
 	return &c
 }
 
+// decodeProviders parses the "providers" section into the typed field, with
+// the same park-on-failure rule as decodeCompaction: a section that is not an
+// object of provider definitions stays in Extra so a later write cannot erase
+// it, and the typed field stays nil (the layer declares no providers, which is
+// the safe reading).
+//
+// An empty object decodes to nil rather than an empty map: "no providers" must
+// look identical whether the key is absent or {} so a resolved view never
+// reports a provider stack that is present-but-empty.
+func decodeProviders(raw json.RawMessage, s *Settings) map[string]models.ProviderConfig {
+	if len(raw) == 0 {
+		return nil
+	}
+	var p map[string]models.ProviderConfig
+	if err := json.Unmarshal(raw, &p); err != nil {
+		if s.Extra != nil {
+			s.Extra[providersKey] = raw
+		}
+		return nil
+	}
+	if len(p) == 0 {
+		return nil
+	}
+	return p
+}
+
 // MarshalJSON reassembles Env, Compaction and Extra into one object.
 //
 // NOTE on the mixed value/pointer receivers across this type: it is deliberate,
@@ -168,9 +223,12 @@ func decodeCompaction(raw json.RawMessage, s *Settings) *CompactionSettings {
 // The same applies to a "compaction" the typed field now carries — but only
 // then: a malformed section (typed nil, parked raw) must survive the write.
 func (s Settings) MarshalJSON() ([]byte, error) {
-	out := make(map[string]json.RawMessage, len(s.Extra)+2)
+	out := make(map[string]json.RawMessage, len(s.Extra)+3)
 	for k, v := range s.Extra {
-		if k == "env" || (k == compactionKey && s.Compaction != nil) {
+		// A parked raw copy is dropped once the typed field carries the
+		// section; a malformed one (typed zero, raw parked) survives.
+		if k == "env" || (k == compactionKey && s.Compaction != nil) ||
+			(k == providersKey && len(s.Providers) > 0) {
 			continue
 		}
 		out[k] = v
@@ -188,6 +246,13 @@ func (s Settings) MarshalJSON() ([]byte, error) {
 			return nil, err
 		}
 		out[compactionKey] = compaction
+	}
+	if len(s.Providers) > 0 {
+		providers, err := json.Marshal(s.Providers)
+		if err != nil {
+			return nil, err
+		}
+		out[providersKey] = providers
 	}
 
 	// json.Marshal sorts map keys, which is what we want: the TypeScript
@@ -210,6 +275,13 @@ func (s Settings) Get(key string) (json.RawMessage, bool) {
 	}
 	if key == compactionKey && s.Compaction != nil {
 		b, err := json.Marshal(s.Compaction)
+		if err != nil {
+			return nil, false
+		}
+		return b, true
+	}
+	if key == providersKey && len(s.Providers) > 0 {
+		b, err := json.Marshal(s.Providers)
 		if err != nil {
 			return nil, false
 		}
@@ -259,6 +331,29 @@ func (s *Settings) Set(key string, raw json.RawMessage) {
 			return
 		}
 		s.Compaction = &c
+		return
+	}
+	if key == providersKey {
+		// Same one-key-two-representations rule as compaction: the typed
+		// field and any parked raw must never both be present.
+		delete(s.Extra, providersKey)
+		if len(raw) == 0 {
+			s.Providers = nil
+			return
+		}
+		var p map[string]models.ProviderConfig
+		if err := json.Unmarshal(raw, &p); err != nil {
+			if s.Extra == nil {
+				s.Extra = make(map[string]json.RawMessage)
+			}
+			s.Extra[providersKey] = raw
+			return
+		}
+		if len(p) == 0 {
+			s.Providers = nil
+			return
+		}
+		s.Providers = p
 		return
 	}
 	if len(raw) == 0 {

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+
+	"ultrac/internal/models"
 )
 
 // FileResolver is the default Resolver. It reads the real files under
@@ -61,14 +63,12 @@ func (r *FileResolver) cacheKey(src Source, cwd string) string {
 func (r *FileResolver) Get(ctx context.Context, cwd string) (*Settings, error) {
 	layers, err := r.Layers(ctx, cwd)
 
-	merged := Settings{}
-	for _, l := range layers {
-		merged = MergeSettings(merged, l.Settings)
+	merged, problems := MergeLayers(layers)
+	verr := validate(&merged)
+	if perr := ProviderProblemsError(problems); perr != nil && verr == nil {
+		verr = perr
 	}
-	if verr := validate(&merged); verr != nil {
-		return &merged, verr
-	}
-	return &merged, err
+	return &merged, errors.Join(verr, err)
 }
 
 // Layers loads each enabled source separately, in merge order.
@@ -273,7 +273,7 @@ func isMissingDir(err error) bool {
 }
 
 func isEmpty(s Settings) bool {
-	return len(s.Env) == 0 && len(s.Extra) == 0 && s.Compaction == nil
+	return len(s.Env) == 0 && len(s.Extra) == 0 && s.Compaction == nil && len(s.Providers) == 0
 }
 
 // MergeSettings deep-merges over into base, later winning.
@@ -286,10 +286,18 @@ func isEmpty(s Settings) bool {
 // The typed Compaction section merges key-by-key, not section-by-section:
 // mergeJSON's last-writer-wins would let a project file that names only
 // keepRecentTokens erase the user layer's enabled flag (plan D6).
+//
+// Providers merge per provider id, whole entry replacing whole entry. Field-
+// level merging would let a project layer that sets only baseUrl inherit the
+// user layer's apiKey, manufacturing a provider combination nobody configured
+// (settings-unify-plan.md D2). Use MergeLayers rather than calling this
+// directly: it enforces the layer-ownership rule that providers only count
+// from the user layer (D4).
 func MergeSettings(base, over Settings) Settings {
 	out := Settings{
 		Env:        mergeStringMaps(base.Env, over.Env),
 		Compaction: mergeCompaction(base.Compaction, over.Compaction),
+		Providers:  mergeProviders(base.Providers, over.Providers),
 	}
 
 	keys := make(map[string]struct{}, len(base.Extra)+len(over.Extra))
@@ -330,6 +338,96 @@ func mergeStringMaps(base, over map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// mergeProviders merges the typed providers section per provider id: a later
+// layer's entry replaces the earlier one wholesale (plan D2). The entries are
+// not deep-copied — a resolved Settings is read-only, and the merge never
+// mutates either side.
+func mergeProviders(base, over map[string]models.ProviderConfig) map[string]models.ProviderConfig {
+	if len(base) == 0 && len(over) == 0 {
+		return nil
+	}
+	out := make(map[string]models.ProviderConfig, len(base)+len(over))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range over {
+		out[k] = v
+	}
+	return out
+}
+
+// ProviderLayerProblem reports providers declared in a layer that is not
+// allowed to carry them (plan D4). Path is the offending file, empty when the
+// layer has no file behind it.
+type ProviderLayerProblem struct {
+	Source    Source
+	Path      string
+	Providers []string
+}
+
+// MergeLayers folds the stack into one resolved view and applies the
+// layer-ownership rule: providers count from the user layer only.
+//
+// A project or local settings file that declares providers is reported through
+// the returned problems and ignored, because those files live in the repository
+// and a credential in them is an unrecoverable leak. The policy layer is
+// ignored silently for now: an enterprise admin dropping a provider stack into
+// MDM settings is a deliberate act this build does not support yet, and
+// warning about it on every launch would be noise (plan D4).
+//
+// Callers that need the resolved stack must go through this function rather
+// than folding with MergeSettings themselves, or the rule does not apply.
+func MergeLayers(layers []Layer) (Settings, []ProviderLayerProblem) {
+	var merged Settings
+	var problems []ProviderLayerProblem
+	for _, l := range layers {
+		s := l.Settings
+		if len(s.Providers) > 0 && l.Source != SourceUser {
+			if l.Source != SourcePolicy && l.Source != SourceDefault {
+				problems = append(problems, ProviderLayerProblem{
+					Source:    l.Source,
+					Path:      l.Path,
+					Providers: sortedProviderIDs(s.Providers),
+				})
+			}
+			s.Providers = nil
+		}
+		merged = MergeSettings(merged, s)
+	}
+	return merged, problems
+}
+
+// sortedProviderIDs returns the provider ids of a section in lexical order, so
+// a diagnostic is stable across runs.
+func sortedProviderIDs(p map[string]models.ProviderConfig) []string {
+	out := make([]string, 0, len(p))
+	for id := range p {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ProviderProblemsError turns layer-ownership problems into the error a caller
+// shows the user, or nil when there are none. Each one names the file, because
+// "providers were ignored" without a path is unactionable.
+func ProviderProblemsError(problems []ProviderLayerProblem) error {
+	if len(problems) == 0 {
+		return nil
+	}
+	errs := make([]error, 0, len(problems))
+	for _, p := range problems {
+		errs = append(errs, &Error{
+			Path: p.Path,
+			Op:   "providers",
+			Err: fmt.Errorf(
+				"must live in the user settings layer; %d provider(s) declared here are ignored (%s)",
+				len(p.Providers), strings.Join(p.Providers, ", ")),
+		})
+	}
+	return errors.Join(errs...)
 }
 
 // mergeCompaction merges the typed compaction section key-by-key. A nil side
