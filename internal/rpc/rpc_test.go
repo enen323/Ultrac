@@ -74,6 +74,36 @@ type testHost struct {
 	setAutoErr     error
 	setAutoCalls   []bool
 	compacting     bool
+
+	// addResult / addErr back the AddCustomModel method: canned data for
+	// the protocol-shape tests, an error for the write-failure path. The
+	// real write (auth.json + models.json + reload) is cmd/ultrac's, tested
+	// there against the real harness; what is under test here is the
+	// command's wire contract and its protocol-level validation.
+	addResult   *AddCustomModelResult
+	addErr      error
+	addCalls    []CustomModelSpec // spec as received, in order
+	addValidate func(CustomModelSpec) error
+}
+
+// AddCustomModel serves the canned result/error and records the spec it was
+// given, so the protocol tests can assert both the response shape and that
+// the command's default filling and field pass-through reached the host
+// verbatim. addValidate, when set, is consulted before the canned answer so
+// a test can pin exactly which specs are expected to reach the host.
+func (h *testHost) AddCustomModel(spec CustomModelSpec) (AddCustomModelResult, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.addCalls = append(h.addCalls, spec)
+	if h.addValidate != nil {
+		if err := h.addValidate(spec); err != nil {
+			return AddCustomModelResult{}, err
+		}
+	}
+	if h.addErr != nil {
+		return AddCustomModelResult{}, h.addErr
+	}
+	return *h.addResult, nil
 }
 
 func newTestHost(t *testing.T, scripts ...[]ai.AssistantEvent) *testHost {
@@ -1145,6 +1175,243 @@ func TestCompactCommandError(t *testing.T) {
 		if _, has := r["data"]; has {
 			t.Error("an error response must not carry data")
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// add_custom_model (custom-model-plan.md)
+// ---------------------------------------------------------------------------
+
+// validCustomModelFields is a well-formed command: every test in this
+// section starts from it and breaks exactly one thing.
+func validCustomModelFields() map[string]any {
+	return map[string]any{
+		"provider": "api.deepseek.com",
+		"baseUrl":  "https://api.deepseek.com/v1",
+		"apiKey":   "sk-test",
+		"api":      string(ai.APIOpenAICompletions),
+		"modelId":  "deepseek-chat",
+	}
+}
+
+func TestAddCustomModelCommandShape(t *testing.T) {
+	h := newTestHost(t)
+	h.addResult = &AddCustomModelResult{
+		Models: []ai.Model{{
+			ID:            "deepseek-chat",
+			Name:          "deepseek-chat",
+			API:           ai.APIOpenAICompletions,
+			Provider:      "api.deepseek.com",
+			BaseURL:       "https://api.deepseek.com/v1",
+			ContextWindow: 128000,
+			MaxTokens:     8192,
+		}},
+		Providers: []CustomModelProviderInfo{{
+			ID:       "api.deepseek.com",
+			BaseURL:  "https://api.deepseek.com/v1",
+			API:      string(ai.APIOpenAICompletions),
+			ModelIDs: []string{"deepseek-chat"},
+		}},
+	}
+
+	lines := h.serve(t, cmd("add_custom_model", validCustomModelFields()))
+	r := response(t, lines, "add_custom_model")
+	if r["success"] != true {
+		t.Fatalf("add_custom_model = %v", r)
+	}
+	d := dataMap(t, r)
+	models, _ := d["models"].([]any)
+	if len(models) != 1 {
+		t.Fatalf("data.models = %v, want the fresh catalog with the new model", d["models"])
+	}
+	entry, _ := models[0].(map[string]any)
+	for k, want := range map[string]any{
+		"id":            "deepseek-chat",
+		"provider":      "api.deepseek.com",
+		"baseUrl":       "https://api.deepseek.com/v1",
+		"api":           string(ai.APIOpenAICompletions),
+		"contextWindow": float64(128000),
+		"maxTokens":     float64(8192),
+	} {
+		if entry[k] != want {
+			t.Errorf("data.models[0][%q] = %v, want %v", k, entry[k], want)
+		}
+	}
+	providers, _ := d["providers"].([]any)
+	if len(providers) != 1 {
+		t.Fatalf("data.providers = %v, want the user-declared providers", d["providers"])
+	}
+	info, _ := providers[0].(map[string]any)
+	for k, want := range map[string]any{
+		"id":      "api.deepseek.com",
+		"baseUrl": "https://api.deepseek.com/v1",
+		"api":     string(ai.APIOpenAICompletions),
+	} {
+		if info[k] != want {
+			t.Errorf("data.providers[0][%q] = %v, want %v", k, info[k], want)
+		}
+	}
+	ids, _ := info["modelIds"].([]any)
+	if len(ids) != 1 || ids[0] != "deepseek-chat" {
+		t.Errorf("data.providers[0].modelIds = %v, want [deepseek-chat]", info["modelIds"])
+	}
+
+	// The plan's defaults (R1): an absent contextWindow / maxTokens means
+	// the default, never zero — a zero window would silently disable
+	// auto-compaction. The rest of the command reaches the host verbatim.
+	if len(h.addCalls) != 1 {
+		t.Fatalf("host calls = %d, want 1", len(h.addCalls))
+	}
+	spec := h.addCalls[0]
+	if spec.ContextWindow != defaultContextWindow || spec.MaxTokens != defaultMaxTokens {
+		t.Errorf("limits = (%d, %d), want the defaults (%d, %d)",
+			spec.ContextWindow, spec.MaxTokens, defaultContextWindow, defaultMaxTokens)
+	}
+	if spec.Provider != "api.deepseek.com" || spec.BaseURL != "https://api.deepseek.com/v1" ||
+		spec.APIKey != "sk-test" || spec.API != string(ai.APIOpenAICompletions) ||
+		spec.ModelID != "deepseek-chat" {
+		t.Errorf("spec = %+v, want the command's fields verbatim", spec)
+	}
+
+	// A client that knows the real limits passes them through, and the
+	// protocol trims surrounding whitespace (a paste with a newline is a
+	// common clipboard artifact).
+	h2 := newTestHost(t)
+	h2.addResult = &AddCustomModelResult{}
+	explicit := validCustomModelFields()
+	explicit["id"] = "m2"
+	explicit["provider"] = "  api.deepseek.com\n"
+	explicit["contextWindow"] = 64000
+	explicit["maxTokens"] = 4096
+	explicit["modelName"] = "DeepSeek Chat"
+	lines = h2.serve(t, cmd("add_custom_model", explicit))
+	if r := response(t, lines, "add_custom_model"); r["success"] != true {
+		t.Fatalf("add_custom_model (explicit limits) = %v", r)
+	}
+	if got := h2.addCalls[0]; got.ContextWindow != 64000 || got.MaxTokens != 4096 ||
+		got.Provider != "api.deepseek.com" || got.ModelName != "DeepSeek Chat" {
+		t.Errorf("spec = %+v, want the explicit limits and the trimmed fields", got)
+	}
+}
+
+func TestAddCustomModelValidationFailures(t *testing.T) {
+	cases := []struct {
+		name   string
+		fields map[string]any // merged over the valid base
+		remove []string       // keys to drop before merging fields
+		want   string
+	}{
+		{
+			name:   "missing provider",
+			remove: []string{"provider"},
+			want:   "provider is required",
+		},
+		{
+			name:   "provider with a slash",
+			fields: map[string]any{"provider": "deepseek/chat"},
+			want:   `must not contain "/" or whitespace`,
+		},
+		{
+			name:   "provider with whitespace",
+			fields: map[string]any{"provider": "deep seek"},
+			want:   `must not contain "/" or whitespace`,
+		},
+		{
+			name:   "missing baseUrl",
+			remove: []string{"baseUrl"},
+			want:   "baseUrl is required",
+		},
+		{
+			name:   "non-http baseUrl",
+			fields: map[string]any{"baseUrl": "ftp://api.deepseek.com"},
+			want:   "must be an http(s) URL with a host",
+		},
+		{
+			name:   "baseUrl without a host",
+			fields: map[string]any{"baseUrl": "https://"},
+			want:   "must be an http(s) URL with a host",
+		},
+		{
+			name:   "missing apiKey",
+			remove: []string{"apiKey"},
+			want:   "apiKey is required",
+		},
+		{
+			name:   "missing modelId",
+			remove: []string{"modelId"},
+			want:   "modelId is required",
+		},
+		{
+			name:   "unregistered dialect",
+			fields: map[string]any{"api": "bedrock-converse-stream"},
+			want:   `api "bedrock-converse-stream" is not a supported dialect`,
+		},
+		{
+			name:   "zero contextWindow",
+			fields: map[string]any{"contextWindow": 0},
+			want:   "contextWindow must be > 0",
+		},
+		{
+			name:   "negative maxTokens",
+			fields: map[string]any{"maxTokens": -1},
+			want:   "maxTokens must be > 0",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHost(t)
+			h.addResult = &AddCustomModelResult{}
+			fields := validCustomModelFields()
+			for _, k := range tc.remove {
+				delete(fields, k)
+			}
+			fields["id"] = "bad"
+			for k, v := range tc.fields {
+				fields[k] = v
+			}
+			lines := h.serve(t, cmd("add_custom_model", fields))
+			r := response(t, lines, "add_custom_model")
+			if r["success"] != false {
+				t.Fatalf("success = %v, want false: %v", r["success"], r)
+			}
+			if got, _ := r["error"].(string); !strings.Contains(got, tc.want) {
+				t.Errorf("error = %q, want it to contain %q", got, tc.want)
+			}
+			if _, has := r["data"]; has {
+				t.Error("an error response must not carry data")
+			}
+			// A malformed command never reaches the host: the write
+			// side is not a validator, and half-writing a provider
+			// from a bad command is the failure D7 warns about.
+			if len(h.addCalls) != 0 {
+				t.Errorf("host calls = %v, want none for a malformed command", h.addCalls)
+			}
+		})
+	}
+}
+
+func TestAddCustomModelHostError(t *testing.T) {
+	// Everything the protocol can check has passed; what fails now is the
+	// filesystem — auth.json unwritable, models.json invalid, a dialect
+	// the host cannot register. The command carries the host's message
+	// verbatim (the dialog shows it) and answers with no data.
+	h := newTestHost(t)
+	h.addErr = errors.New("write auth.json: Access is denied")
+	fields := validCustomModelFields()
+	fields["id"] = "m1"
+	lines := h.serve(t, cmd("add_custom_model", fields))
+	r := response(t, lines, "add_custom_model")
+	if r["success"] != false {
+		t.Fatalf("success = %v, want false: %v", r["success"], r)
+	}
+	if got, _ := r["error"].(string); got != "write auth.json: Access is denied" {
+		t.Errorf("error = %q, want it verbatim", got)
+	}
+	if _, has := r["data"]; has {
+		t.Error("an error response must not carry data")
+	}
+	if len(h.addCalls) != 1 {
+		t.Errorf("host calls = %d, want 1 — a valid command must reach the host", len(h.addCalls))
 	}
 }
 

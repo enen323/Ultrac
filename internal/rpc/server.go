@@ -26,13 +26,16 @@
 // get_available_thinking_levels, set_steering_mode, set_follow_up_mode,
 // get_messages, get_last_assistant_text, set_session_name, get_entries,
 // get_commands, list_sessions, resume_session, compact,
-// set_auto_compaction, fork, clone, get_fork_messages, get_tree.
+// set_auto_compaction, fork, clone, get_fork_messages, get_tree,
+// add_custom_model.
 //
-// list_sessions and resume_session are Ultrac extensions beyond pi's set
-// (types.go explains why and what pi's switch_session would have been);
-// compact and set_auto_compaction are pi's own, landed with P-C2 of
-// docs/compaction-branch-plan.md; fork / clone / get_fork_messages /
-// get_tree are pi's branch quartet, landed with P-C4.
+// list_sessions, resume_session and add_custom_model are Ultrac
+// extensions beyond pi's set (types.go explains why and what pi's
+// switch_session would have been); compact and set_auto_compaction are
+// pi's own, landed with P-C2 of docs/compaction-branch-plan.md; fork /
+// clone / get_fork_messages / get_tree are pi's branch quartet, landed
+// with P-C4; add_custom_model is the desktop shell's custom-model flow,
+// landed with docs/开发计划/新功能计划/custom-model-plan.md.
 //
 // Not implemented (rpc-types.ts has them; this port does not):
 // set_auto_retry, abort_retry, bash, abort_bash, export_html,
@@ -48,10 +51,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"ultrac/internal/agent"
 	"ultrac/internal/ai"
@@ -168,6 +174,19 @@ type Host interface {
 	// "Cannot clone session: no current entry selected") or the extraction
 	// failing.
 	Clone() (string, error)
+
+	// AddCustomModel persists a user-declared provider and reloads the
+	// catalog (custom-model-plan.md D3/D4): the credential goes to
+	// auth.json, the declaration to models.json — both at the user layer,
+	// which is cwd-independent (D8) — and the fresh snapshot is published
+	// so the new model is selectable in this process without a restart.
+	// The spec arrives already validated (validateCustomModelSpec); the
+	// error is a write failure or a reload failure. A models.json write
+	// failure leaves an orphan credential in auth.json, which is harmless
+	// and visible (`ultrac config` lists auth-only providers) — the
+	// reverse order would leave a model with no credential, failing the
+	// next launch's fail-fast (D7).
+	AddCustomModel(spec CustomModelSpec) (AddCustomModelResult, error)
 }
 
 // PromptInput is one prompt command's assembled messages.
@@ -353,6 +372,8 @@ func (s *Server) dispatch(cmd RpcCommand) (RpcResponse, func()) {
 		return s.cmdGetForkMessages(cmd), nil
 	case CmdGetTree:
 		return s.cmdGetTree(cmd), nil
+	case CmdAddCustomModel:
+		return s.cmdAddCustomModel(cmd), nil
 	default:
 		// Unknown command: a clear error, never a crash (plan DoD). This is
 		// also where every pi command this port deliberately does not
@@ -715,6 +736,95 @@ func leafOrNull(leafID string) any {
 		return nil
 	}
 	return leafID
+}
+
+// ---------------------------------------------------------------------------
+// Custom model (custom-model-plan.md)
+// ---------------------------------------------------------------------------
+
+// The form defaults the plan prescribes (R1). They live on the protocol
+// side because an absent command field means "the default", never zero:
+// a zero contextWindow would disable auto-compaction silently.
+const (
+	defaultContextWindow = 128000
+	defaultMaxTokens     = 8192
+)
+
+func (s *Server) cmdAddCustomModel(cmd RpcCommand) RpcResponse {
+	spec := CustomModelSpec{
+		Provider:      strings.TrimSpace(cmd.Provider),
+		BaseURL:       strings.TrimSpace(cmd.BaseURL),
+		APIKey:        cmd.APIKey,
+		API:           strings.TrimSpace(cmd.API),
+		ModelID:       strings.TrimSpace(cmd.ModelID),
+		ModelName:     strings.TrimSpace(cmd.ModelName),
+		ContextWindow: defaultContextWindow,
+		MaxTokens:     defaultMaxTokens,
+	}
+	if cmd.ContextWindow != nil {
+		spec.ContextWindow = *cmd.ContextWindow
+	}
+	if cmd.MaxTokens != nil {
+		spec.MaxTokens = *cmd.MaxTokens
+	}
+	// The protocol-level half of the validation: a malformed command is
+	// answered here and never reaches the host (the set_session_name /
+	// set_auto_compaction pattern). Semantic checks that need the
+	// filesystem — an unregistered dialect, a write failure — are the
+	// host's, and come back as its error.
+	if err := ValidateCustomModelSpec(spec); err != nil {
+		return errorResponse(cmd.ID, CmdAddCustomModel, err.Error())
+	}
+	result, err := s.host.AddCustomModel(spec)
+	if err != nil {
+		return errorResponse(cmd.ID, CmdAddCustomModel, err.Error())
+	}
+	return successResponse(cmd.ID, CmdAddCustomModel, result)
+}
+
+// ValidateCustomModelSpec checks the fields that make the command
+// malformed rather than the write failing: the required ones, the
+// baseUrl's shape, the provider id's fitness as a models.json key (it is
+// also set_model's "provider/" part — a "/" in it would be
+// unselectable), and the dialect (only the two registered ones, F2).
+//
+// It is exported because the host runs the same rules on its own entry
+// point (cmd/ultrac's AddCustomModel): a direct caller — the P6
+// persistence test — must get the same refusal the protocol gives, from
+// one source of truth rather than a second copy that can drift.
+func ValidateCustomModelSpec(spec CustomModelSpec) error {
+	if spec.Provider == "" {
+		return fmt.Errorf("provider is required")
+	}
+	if strings.ContainsAny(spec.Provider, "/") || strings.ContainsFunc(spec.Provider, unicode.IsSpace) {
+		return fmt.Errorf("provider %q must not contain %q or whitespace", spec.Provider, "/")
+	}
+	if spec.BaseURL == "" {
+		return fmt.Errorf("baseUrl is required")
+	}
+	u, err := url.Parse(spec.BaseURL)
+	if err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" {
+		return fmt.Errorf("baseUrl %q must be an http(s) URL with a host", spec.BaseURL)
+	}
+	if spec.APIKey == "" {
+		return fmt.Errorf("apiKey is required")
+	}
+	if spec.ModelID == "" {
+		return fmt.Errorf("modelId is required")
+	}
+	switch spec.API {
+	case string(ai.APIOpenAICompletions), string(ai.APIAnthropicMessages):
+	default:
+		return fmt.Errorf("api %q is not a supported dialect (want %q or %q)",
+			spec.API, ai.APIOpenAICompletions, ai.APIAnthropicMessages)
+	}
+	if spec.ContextWindow <= 0 {
+		return fmt.Errorf("contextWindow must be > 0")
+	}
+	if spec.MaxTokens <= 0 {
+		return fmt.Errorf("maxTokens must be > 0")
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

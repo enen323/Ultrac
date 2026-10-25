@@ -72,6 +72,16 @@ type RpcCommand struct {
 	Provider string `json:"provider,omitempty"`
 	ModelID  string `json:"modelId,omitempty"`
 
+	// add_custom_model (an Ultrac extension, like list_sessions): the
+	// provider/modelId fields above are reused for the spec's provider
+	// id and model id; the rest are this command's own.
+	BaseURL       string `json:"baseUrl,omitempty"`
+	APIKey        string `json:"apiKey,omitempty"`
+	API           string `json:"api,omitempty"`
+	ModelName     string `json:"modelName,omitempty"`
+	ContextWindow *int   `json:"contextWindow,omitempty"`
+	MaxTokens     *int   `json:"maxTokens,omitempty"`
+
 	// set_thinking_level
 	Level string `json:"level,omitempty"`
 
@@ -134,6 +144,14 @@ const (
 	// compatible: every other command's shape is untouched.
 	CmdListSessions  = "list_sessions"
 	CmdResumeSession = "resume_session"
+	// CmdAddCustomModel is the desktop shell's custom-model flow
+	// (docs/开发计划/新功能计划/custom-model-plan.md): one command writes
+	// auth.json + models.json and reloads the catalog, so a
+	// user-declared provider is selectable without a restart (D3). It is
+	// an Ultrac extension beyond pi's command set — pi has no RPC surface
+	// for provider configuration — added the same way list_sessions was:
+	// a new name, no existing command's shape touched.
+	CmdAddCustomModel = "add_custom_model"
 	// CmdCompact and CmdSetAutoCompaction are pi's compaction pair
 	// (rpc-mode.ts:533-540), landed with P-C2 of
 	// docs/compaction-branch-plan.md. The wire shapes are pi's: compact
@@ -226,6 +244,58 @@ type CompactResult struct {
 	EstimatedTokensAfter int                       `json:"estimatedTokensAfter"`
 	Usage                ai.Usage                  `json:"usage"`
 	Details              session.CompactionDetails `json:"details"`
+}
+
+// CustomModelSpec is the add_custom_model command's payload (plan D3:
+// one command, one user intent — write the credential, write the
+// declaration, reload, answer).
+//
+// It deliberately carries no source/layer field: both files are written
+// at the user layer (ConfigHome), which is cwd-independent, so the layer
+// choice is not the client's to make (D8 — a project-layer write would
+// make the model vanish when the shell opens from another directory).
+type CustomModelSpec struct {
+	// Provider is the models.json key, and the "provider/" part of
+	// set_model's syntax. The client derives it from the baseUrl host
+	// when the user leaves the field alone.
+	Provider string
+	// BaseURL is the endpoint root ("https://api.example.com/v1").
+	BaseURL string
+	// APIKey is the literal credential. It lands in auth.json, never in
+	// models.json (D1): the chain's first step reads models.json's
+	// apiKey, and a key left there would shadow an auth.json edit.
+	APIKey string
+	// API is the dialect. Only the two registered ones are accepted
+	// (F2): openai-completions and anthropic-messages.
+	API string
+	// ModelID is the endpoint's model id ("deepseek-chat").
+	ModelID string
+	// ModelName is the display name in the picker; empty means the id.
+	ModelName string
+	// ContextWindow and MaxTokens are the model's limits. The server
+	// fills the plan's defaults for an absent command field (R1: a zero
+	// window would disable auto-compaction silently); the host rejects
+	// non-positive values.
+	ContextWindow int
+	MaxTokens     int
+}
+
+// CustomModelProviderInfo is one provider in add_custom_model's
+// response: what the dialog shows under "已添加".
+type CustomModelProviderInfo struct {
+	ID       string   `json:"id"`
+	BaseURL  string   `json:"baseUrl"`
+	API      string   `json:"api"`
+	ModelIDs []string `json:"modelIds"`
+}
+
+// AddCustomModelResult is the command's response data: the fresh model
+// catalog — the picker patches from it, no second round trip — plus
+// every user-declared provider (built-in-only providers are absent:
+// nothing was declared for them).
+type AddCustomModelResult struct {
+	Models    []ai.Model                `json:"models"`
+	Providers []CustomModelProviderInfo `json:"providers"`
 }
 
 // successResponse builds a success response. data nil omits the field,
