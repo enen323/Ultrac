@@ -5,7 +5,7 @@
 // see and override, never a hidden one).
 //
 // Submitting is add_custom_model: the kernel writes the credential to
-// auth.json and the declaration to models.json — both at the user layer,
+// settings' providers section at the user layer,
 // so the model is there whatever directory the next launch starts from
 // (D8) — reloads, and answers with the fresh catalog, which the store
 // patches into the picker (D4). No restart, no second round trip.
@@ -139,7 +139,7 @@ export function CustomModelDialog({ models, error, onAdd, onClose }: Props) {
               onChange={(event) => set({ apiKey: event.target.value })}
             />
             <p className="custom-hint">
-              只写入本机 auth.json（0600）。本地无鉴权端点（如 Ollama）可填任意占位符。
+              只写入本机 settings.json 的 providers 段（仅用户层）。本地无鉴权端点（如 Ollama）可填任意占位符。
             </p>
             {field("apiKey") && <p className="custom-err">{field("apiKey")}</p>}
           </div>

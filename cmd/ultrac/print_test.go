@@ -143,11 +143,12 @@ func newPrintEnv(t *testing.T) *printEnv {
 	if err := os.WriteFile(filepath.Join(cwd, "hello.txt"), []byte("hello from the sandbox\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// The only place a key can live since settings-unify-plan.md D11: the
+	// provider entry. Key-only, so the catalog supplies the baseUrl and
+	// dialect, exactly as a user who only pasted a key would get.
 	settings := `{
-      "env": {
-        "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
-        "ANTHROPIC_AUTH_TOKEN": "sk-test-token",
-        "ANTHROPIC_MODEL": "deepseek-chat"
+      "providers": {
+        "deepseek": { "apiKey": "sk-test-token" }
       }
     }`
 	if err := os.WriteFile(filepath.Join(home, "settings.json"), []byte(settings), 0o644); err != nil {

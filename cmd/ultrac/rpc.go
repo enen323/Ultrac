@@ -29,14 +29,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"ultrac/internal/agent"
 	"ultrac/internal/ai"
 	"ultrac/internal/config"
-	"ultrac/internal/config/auth"
 	"ultrac/internal/models"
 	"ultrac/internal/rpc"
 	"ultrac/internal/session"
@@ -197,7 +196,7 @@ func (host *rpcHost) ResumeSession(path string) error {
 		// The snapshot the resume resolves against is the live one: an
 		// add_custom_model may have replaced it since startup (D4).
 		cfg := host.h.cfg.Load()
-		if m, err := resolveModel(cfg.snapshot, seed.Model.Provider+"/"+seed.Model.ModelID, host.h.flags.API, cfg.effective); err == nil &&
+		if m, err := resolveModel(cfg.snapshot, seed.Model.Provider+"/"+seed.Model.ModelID, host.h.flags.API); err == nil &&
 			containsModel(host.h.availableModels(), m) {
 			host.h.model = m
 		}
@@ -356,49 +355,81 @@ func (host *rpcHost) AddCustomModel(spec rpc.CustomModelSpec) (rpc.AddCustomMode
 	if err := rpc.ValidateCustomModelSpec(spec); err != nil {
 		return rpc.AddCustomModelResult{}, err
 	}
+	// A pasted endpoint ("…/v1/chat/completions") would be appended to a
+	// second time by the adapter, producing a 404 against a correct key.
+	// The declaration is normalised to API-root level instead
+	// (settings-unify-plan.md D10).
+	spec.BaseURL = normalizeBaseURL(spec.BaseURL)
 
-	// D1: the key goes to auth.json and never into models.json — the
-	// chain's first step reads models.json's apiKey, and a key left
-	// there would shadow an auth.json edit forever after.
-	authPath := filepath.Join(config.ConfigHome(), "auth.json")
-	if err := auth.Update(authPath, spec.Provider, spec.APIKey, false); err != nil {
-		return rpc.AddCustomModelResult{}, fmt.Errorf("write auth.json: %w", err)
-	}
-
-	modelsPath := filepath.Join(config.ConfigHome(), "models.json")
-	cfg, err := models.Load(modelsPath)
+	// One write, one file, one key. The provider entry carries the baseUrl,
+	// the dialect AND the credential, so the URL a key belongs to can never
+	// drift away from it — the failure this whole change exists to remove
+	// (that split is what produced "your api key is invalid" while sending a
+	// perfectly good key to the wrong vendor).
+	//
+	// Update, not a hand-rolled write: it owns read-modify-write, the
+	// Extra-preserving marshal that keeps hooks/permissions intact, the
+	// Windows atomic replace, and cache invalidation. Every one of those is
+	// a rule this flow would otherwise have to re-implement.
+	err := host.h.resolver.Update(context.Background(), config.SourceUser, host.h.cwd,
+		func(s *config.Settings) error {
+			if s.Providers == nil {
+				s.Providers = make(map[string]models.ProviderConfig, 1)
+			}
+			upsertCustomProvider(s.Providers, spec)
+			return nil
+		})
 	if err != nil {
-		return rpc.AddCustomModelResult{}, fmt.Errorf("read models.json: %w", err)
-	}
-	upsertCustomProvider(&cfg, spec)
-	if err := models.Save(modelsPath, cfg); err != nil {
-		return rpc.AddCustomModelResult{}, fmt.Errorf("write models.json: %w", err)
+		return rpc.AddCustomModelResult{}, fmt.Errorf("write settings: %w", err)
 	}
 
-	if err := host.h.reloadModels(); err != nil {
+	if err := host.h.reloadConfig(); err != nil {
 		return rpc.AddCustomModelResult{}, err
 	}
 	return customModelCatalog(host.h.cfg.Load().snapshot), nil
 }
 
-// upsertCustomProvider merges the spec into a models.json config: the
-// provider entry gains the baseUrl and the dialect (an existing entry's
-// values win — the user may have tuned them by hand), and the model
-// definition replaces a matching id wholesale or appends, exactly the
-// upsert rule merge.go applies at load time. The apiKey is deliberately
-// absent (D1); a name-less definition falls back to the id, which is
-// what modelFromJSON does with the same omission.
-func upsertCustomProvider(cfg *models.Config, spec rpc.CustomModelSpec) {
-	if cfg.Providers == nil {
-		cfg.Providers = map[string]models.ProviderConfig{}
+// normalizeBaseURL trims a declared base URL back to API-root level: the
+// adapters append their own path (/chat/completions, /v1/messages), so a URL
+// that already ends in one of those would be doubled into a 404.
+//
+// Longest suffixes first: "/v1/messages" must be tested before "/messages" or
+// the result keeps a dangling "/v1".
+func normalizeBaseURL(raw string) string {
+	u := strings.TrimRight(strings.TrimSpace(raw), "/")
+	for _, suffix := range []string{
+		"/chat/completions",
+		"/v1/messages",
+		"/completions",
+		"/messages",
+	} {
+		if trimmed, ok := strings.CutSuffix(u, suffix); ok {
+			u = trimmed
+			break
+		}
 	}
-	entry := cfg.Providers[spec.Provider]
+	return strings.TrimRight(u, "/")
+}
+
+// upsertCustomProvider merges the spec into a providers map: the entry gains
+// the baseUrl and the dialect (an existing entry's values win — the user may
+// have tuned them by hand), the credential is replaced every time (a re-add is
+// how a rotated key gets in), and the model definition replaces a matching id
+// wholesale or appends, exactly the upsert rule merge.go applies at load time.
+// A name-less definition falls back to the id, which is what modelFromJSON does
+// with the same omission.
+func upsertCustomProvider(providers map[string]models.ProviderConfig, spec rpc.CustomModelSpec) {
+	entry := providers[spec.Provider]
 	if entry.BaseURL == "" {
 		entry.BaseURL = spec.BaseURL
 	}
 	if entry.API == "" {
 		entry.API = spec.API
 	}
+	// Always overwrite: the spec's key is the user's latest word on the
+	// subject, and keeping an older one would make "add custom model" the one
+	// operation that cannot rotate a credential.
+	entry.APIKey = spec.APIKey
 	def := models.ModelDefinition{
 		ID:            spec.ModelID,
 		ContextWindow: &spec.ContextWindow,
@@ -415,11 +446,11 @@ func upsertCustomProvider(cfg *models.Config, spec rpc.CustomModelSpec) {
 			def.Name = existing.Name // a re-save keeps the display name
 		}
 		entry.Models[i] = def
-		cfg.Providers[spec.Provider] = entry
+		providers[spec.Provider] = entry
 		return
 	}
 	entry.Models = append(entry.Models, def)
-	cfg.Providers[spec.Provider] = entry
+	providers[spec.Provider] = entry
 }
 
 // customModelCatalog builds add_custom_model's response from the fresh

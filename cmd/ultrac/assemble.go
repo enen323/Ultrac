@@ -33,6 +33,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -44,7 +45,6 @@ import (
 	"ultrac/internal/ai"
 	"ultrac/internal/compact"
 	"ultrac/internal/config"
-	"ultrac/internal/config/auth"
 	"ultrac/internal/logging"
 	"ultrac/internal/models"
 	"ultrac/internal/prompt"
@@ -99,24 +99,20 @@ type harness struct {
 	streamFn agent.StreamFn
 }
 
-// resolvedConfig is what reloadModels replaces wholesale (plan D4): the
-// four values the add_custom_model flow can change on disk while the
-// process runs. It is immutable once built — a reload computes a new one
-// and swaps the pointer, so no reader ever observes a half-update.
+// resolvedConfig is what reloadConfig replaces wholesale (plan D4): the value
+// the add_custom_model flow can change on disk while the process runs. It is
+// immutable once built — a reload computes a new one and swaps the pointer, so
+// no reader ever observes a half-update.
+//
+// It is one field because there is one source: the snapshot carries the
+// providers, and a provider carries its own baseUrl, dialect and credential
+// (settings-unify-plan.md). The settings env block is not read here at all —
+// there is no credential fallback and no endpoint override to keep in sync.
 type resolvedConfig struct {
-	// snapshot is the merged model catalog (built-in + both models.json
-	// layers). Every model resolution and every availableModels list goes
-	// through it, so a models.json entry is visible everywhere the
-	// handwritten catalog used to be the only source.
+	// snapshot is the merged model catalog (built-in + the user layer's
+	// providers). Every model resolution and every availableModels list goes
+	// through it.
 	snapshot *models.Snapshot
-	// authStack is the merged credential view (both auth.json layers).
-	authStack *auth.Stack
-	// effective is the settings env block (the last-resort credential
-	// fallback and the model/baseUrl conventions).
-	effective map[string]string
-	// envToken is the settings env block's token, precomputed because
-	// credentialFor reads it on every request.
-	envToken string
 }
 
 // buildHarness assembles the stack. A non-zero return is the exit code;
@@ -144,16 +140,19 @@ func buildHarness(f *agentFlags, cwd string, stderr io.Writer, streamFn agent.St
 	if loadErr != nil {
 		fmt.Fprintf(stderr, "warning: %v\n", loadErr)
 	}
-	effective := config.EffectiveEnv(layers)
 
-	// -- 1b. models.json layers ------------------------------------------
+	// -- 1b. Provider definitions -----------------------------------------
 	//
-	// The two models.json files merge over the built-in catalog. A load
-	// failure degrades to a warning (pi: model-config.ts catches per file
-	// and continues); per-provider composition problems are reported the
-	// same way here and become hard errors only when a run selects the
-	// broken provider (resolveModel checks).
-	snapshot := loadModelSnapshot(cwd, stderr)
+	// The request's connection information comes from settings `providers`,
+	// and only from the user layer (settings-unify-plan.md D4). A non-user
+	// layer that declares providers is reported as an error rather than a
+	// warning: that file lives in the repository, and a credential committed
+	// there cannot be taken back.
+	merged, providerProblems := config.MergeLayers(layers)
+	if perr := config.ProviderProblemsError(providerProblems); perr != nil {
+		fmt.Fprintf(stderr, "%v\n", perr)
+	}
+	snapshot := snapshotFromSettings(merged)
 	for _, p := range snapshot.Problems() {
 		fmt.Fprintf(stderr, "warning: %v\n", p)
 	}
@@ -161,10 +160,6 @@ func buildHarness(f *agentFlags, cwd string, stderr io.Writer, streamFn agent.St
 	// The compaction section resolves the same way: merge the layers, then
 	// inject the engine defaults for absent keys (plan D6). The defaults
 	// never enter a file — Get() reports what the files actually say.
-	merged := config.Settings{}
-	for _, l := range layers {
-		merged = config.MergeSettings(merged, l.Settings)
-	}
 	compaction := resolveCompactionSettings(merged.Compaction, stderr)
 
 	// -- 2. Session ---------------------------------------------------------
@@ -177,36 +172,35 @@ func buildHarness(f *agentFlags, cwd string, stderr io.Writer, streamFn agent.St
 		return nil, 1
 	}
 
-	// -- 3. Model and credential ------------------------------------------
+	// -- 3. Model ----------------------------------------------------------
+	//
+	// Two sources only: --model, or the model the resumed session last ran
+	// with. ANTHROPIC_MODEL is ignored (settings-unify-plan.md D11), so
+	// "nothing named a model" is a real state rather than a fallback.
 	flagModel := f.Model
-	if flagModel == "" && effective[config.EnvModel] == "" && seed.Model != nil {
-		// Resume fallback: the session's last recorded model, expressed in
-		// the flag's provider/id syntax so resolveModel treats it exactly
-		// like a user-typed value.
+	if flagModel == "" && seed.Model != nil {
+		// Resume: the session's last recorded model, expressed in the flag's
+		// provider/id syntax so resolveModel treats it exactly like a
+		// user-typed value.
 		flagModel = seed.Model.Provider + "/" + seed.Model.ModelID
 	}
-	model, err := resolveModel(snapshot, flagModel, f.API, effective)
-	if err != nil {
+	model, err := resolveModel(snapshot, flagModel, f.API)
+	switch {
+	case err == nil:
+		// resolved
+	case errors.Is(err, errNoModelConfigured) && f.Mode == "rpc":
+		// RPC mode stays alive without a model. The client's next move is
+		// set_model; exiting here would leave the desktop shell with a dead
+		// kernel and nothing to pick from. Every prompt before that answers
+		// "no model configured" (rpc.Server.cmdPrompt).
+		model = ai.Model{}
+	case errors.Is(err, errNoModelConfigured):
+		noModelGuidance(stderr)
+		return nil, 2
+	default:
 		fmt.Fprintf(stderr, "ultrac: %v\n", err)
 		return nil, 2
 	}
-
-	// -- 3b. Credential chain (P3) ------------------------------------------
-	//
-	// auth.json merges the same two layers models.json does (authfile.go).
-	// File-level failures degrade to warnings inside loadAuthStack;
-	// per-provider problems (an oauth block, a malformed entry) are
-	// reported here and cost that provider its credential, nothing else.
-	authStack := loadAuthStack(cwd, stderr)
-	for _, p := range authStack.Problems() {
-		fmt.Fprintf(stderr, "warning: %v\n", p)
-	}
-	// The chain first, the settings env block's token second. The order
-	// is the whole story of P3: a per-provider credential always beats
-	// the one-token-for-everything env fallback, and a provider with
-	// neither still authenticates the way it did before the chain
-	// existed (D6).
-	envToken := settingsEnvToken(effective)
 
 	// -- 4. Tools ------------------------------------------------------------
 	tools := tool.All(cwd)
@@ -222,90 +216,91 @@ func buildHarness(f *agentFlags, cwd string, stderr io.Writer, streamFn agent.St
 		compaction: compaction,
 		streamFn:   streamFn,
 	}
-	h.cfg.Store(&resolvedConfig{
-		snapshot:  snapshot,
-		authStack: authStack,
-		effective: effective,
-		envToken:  envToken,
-	})
-	// The fail-fast reads through the same resolver the agent loop calls
-	// per request, so what it checks is what requests will get.
-	if h.credentialFor(string(model.Provider)) == "" {
+	h.cfg.Store(&resolvedConfig{snapshot: snapshot})
+
+	// The fail-fast reads through the same resolver the agent loop calls per
+	// request, so what it checks is what requests will get. A harness that
+	// has no model yet (RPC mode) has nothing to fail fast about: the
+	// credential is checked when a model is selected.
+	if model.ID != "" && h.credentialFor(string(model.Provider)) == "" {
 		noCredentialGuidance(stderr, string(model.Provider))
 		return nil, 1
 	}
 	return h, 0
 }
 
-// credentialFor resolves the API key for one provider: the per-provider
-// chain (models.json apiKey → auth.json, plan §4.6) with the settings
-// env block's token as the last-resort fallback — the chain itself never
-// reads env (D6); the env block reaches the wire through its own pre-P3
-// path, which the fallback preserves.
-//
-// It reads the current resolvedConfig on every call instead of capturing
-// values at startup (plan D4): reloadModels swaps the pointer after an
-// add_custom_model write, and the agent loop calls GetAPIKey once per
-// request (internal/agent/loop.go), so a credential added mid-session is
-// live for the next request without touching the loop (F8). Every
-// consumer goes through it with the CURRENT model's provider: the agent
-// loop (GetAPIKey), the compactor's summary request, and the startup
-// fail-fast.
-func (h *harness) credentialFor(provider string) string {
-	cfg := h.cfg.Load()
-	if key := resolveCredential(cfg.snapshot, cfg.authStack, provider); key != "" {
-		return key
-	}
-	return cfg.envToken
+// noModelGuidance is the CLI's "you never said which model" exit. It replaces
+// the old ANTHROPIC_MODEL hint: there is one place a model can come from, and
+// saying so is cheaper than a user guessing why the run stopped.
+func noModelGuidance(w io.Writer) {
+	fmt.Fprintln(w, "ultrac: no model configured.")
+	fmt.Fprintln(w, "        Pass --model provider/id, or declare a provider in the")
+	fmt.Fprintf(w, "        \"providers\" section of %s.\n",
+		filepath.Join(config.ConfigHome(), "settings.json"))
+	fmt.Fprintln(w, "        Run `ultrac config` to see what is declared.")
 }
 
-// reloadModels re-reads everything the add_custom_model flow can have
-// changed on disk — both models.json layers, both auth.json layers, and
-// the settings layers the env fallback comes from — and publishes the
-// result as one new resolvedConfig (plan D4). Compute-then-swap: no
-// reader ever sees a half-updated config, and an in-flight request keeps
-// the snapshot it started with, finishing with the old key while the
-// next one uses the new (R6).
+// credentialFor resolves the API key for one provider: that provider's own
+// apiKey in the resolved settings, and nothing else (settings-unify-plan.md
+// D11 — the env-block fallback is gone).
 //
-// Layer problems degrade exactly as they do at startup: a broken file is
-// a warning, not a failure — the reload keeps whatever loaded. The
-// warnings are dropped here because the startup pass already printed
-// them and the RPC mode's stderr is the client's diagnostics channel;
-// the errors that do propagate are the ones that leave the harness
-// unable to resolve anything at all.
-func (h *harness) reloadModels() error {
+// It reads the current resolvedConfig on every call instead of capturing
+// values at startup: reloadConfig swaps the pointer after an add_custom_model
+// write, and the agent loop calls GetAPIKey once per request
+// (internal/agent/loop.go), so a credential added mid-session is live for the
+// next request without touching the loop (F8). Every consumer goes through it
+// with the CURRENT model's provider: the agent loop (GetAPIKey), the
+// compactor's summary request, and the startup fail-fast.
+func (h *harness) credentialFor(provider string) string {
+	return resolveCredential(h.cfg.Load().snapshot, provider)
+}
+
+// reloadConfig re-reads everything the add_custom_model flow can have changed
+// on disk — the settings layers, which now hold both the provider definitions
+// and the credential — and publishes the result as one new resolvedConfig
+// (plan D4). Compute-then-swap: no reader ever sees a half-updated config, and
+// an in-flight request keeps the snapshot it started with, finishing with the
+// old key while the next one uses the new (R6).
+//
+// The resolver's cache is dropped first. Before settings owned the providers
+// this was unnecessary (models.json was read straight off disk); now a stale
+// cached layer would make the write invisible to the very process that made
+// it, which is the failure mode the Resolver contract exists to prevent
+// (internal/config/config.go, "including cache invalidation").
+//
+// Layer problems degrade exactly as they do at startup: a broken file is a
+// warning, not a failure — the reload keeps whatever loaded. The warnings are
+// dropped here because the startup pass already printed them and the RPC
+// mode's stderr is the client's diagnostics channel; the errors that do
+// propagate are the ones that leave the harness unable to resolve anything at
+// all.
+func (h *harness) reloadConfig() error {
+	h.resolver.InvalidateAll()
 	layers, err := h.resolver.Layers(context.Background(), h.cwd)
 	if err != nil {
 		return fmt.Errorf("reload settings layers: %w", err)
 	}
-	effective := config.EffectiveEnv(layers)
-	h.cfg.Store(&resolvedConfig{
-		snapshot:  loadModelSnapshot(h.cwd, io.Discard),
-		authStack: loadAuthStack(h.cwd, io.Discard),
-		effective: effective,
-		envToken:  settingsEnvToken(effective),
-	})
+	merged, _ := config.MergeLayers(layers)
+	h.cfg.Store(&resolvedConfig{snapshot: snapshotFromSettings(merged)})
 	return nil
 }
 
-// noCredentialGuidance is the startup fail-fast for a model whose
-// provider resolves to no credential anywhere (plan §4.6). It keeps the
-// old "no credential is configured" wording — tests and users know it —
-// and upgrades the body to per-provider guidance: the provider is named,
-// and the two files the chain reads come first, with the settings env
-// block mentioned last as the legacy fallback it now is.
+// noCredentialGuidance is the startup fail-fast for a model whose provider
+// declares no credential. There is one place a key can live now, so the
+// guidance names exactly that and nothing else (settings-unify-plan.md D11).
 func noCredentialGuidance(w io.Writer, provider string) {
 	if provider != "" {
 		fmt.Fprintf(w, "ultrac: no credential is configured for provider %q.\n", provider)
 	} else {
 		fmt.Fprintln(w, "ultrac: no credential is configured.")
 	}
-	fmt.Fprintf(w, "        Put the key in %s:\n", filepath.Join(config.ConfigHome(), "auth.json"))
-	fmt.Fprintf(w, "          {\"%s\": {\"type\": \"api_key\", \"key\": \"sk-...\"}}\n", provider)
-	fmt.Fprintln(w, "        or in that provider's \"apiKey\" field in models.json")
-	fmt.Fprintln(w, "        (<ConfigHome>/models.json or <cwd>/.ultrac/models.json).")
-	fmt.Fprintln(w, "        ANTHROPIC_AUTH_TOKEN in the settings \"env\" block remains a")
-	fmt.Fprintln(w, "        last-resort fallback.")
+	fmt.Fprintf(w, "        Declare it in the \"providers\" section of %s:\n",
+		filepath.Join(config.ConfigHome(), "settings.json"))
+	fmt.Fprintf(w, "          \"providers\": {\"%s\": {\"baseUrl\": \"https://...\", \"apiKey\": \"...\"}}\n", provider)
+	fmt.Fprintln(w, "        Providers live in the USER settings layer only; a project")
+	fmt.Fprintln(w, "        settings file that declares them is ignored (it would be")
+	fmt.Fprintln(w, "        committed to git).")
+	fmt.Fprintln(w, "        There is no env fallback: ANTHROPIC_AUTH_TOKEN is not read.")
 	fmt.Fprintln(w, "        Run `ultrac config` to see what the layers currently resolve to.")
 }
 
@@ -461,9 +456,6 @@ func (h *harness) availableModels() []ai.Model {
 	out := ai.Catalog()
 	if cfg.snapshot != nil {
 		out = cfg.snapshot.Catalog()
-	}
-	if m, err := resolveModel(cfg.snapshot, "", "", cfg.effective); err == nil && !containsModel(out, m) {
-		out = append(out, m)
 	}
 	return out
 }

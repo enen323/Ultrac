@@ -171,18 +171,18 @@ export interface ForkResult {
 /**
  * CustomModelSpec — add_custom_model's payload (internal/rpc/types.go).
  * One command, one user intent: the kernel writes the credential to
- * auth.json, the declaration to models.json, reloads, and answers (D3).
+ * the provider entry, reloads, and answers (D3).
  *
  * It deliberately carries no source/layer field: both files are written
  * at the user layer, which is cwd-independent, so the layer is not the
  * client's to choose (D8).
  */
 export interface CustomModelSpec {
-  /** The models.json key, and set_model's "provider/" part. */
+  /** The provider id: the providers map key and set_model's "provider/" part. */
   provider: string;
   /** The endpoint root ("https://api.example.com/v1"). */
   baseUrl: string;
-  /** The literal credential; it lands in auth.json, never models.json (D1). */
+  /** The literal credential; it lands in the provider entry's apiKey. */
   apiKey: string;
   /** The dialect: one of the two the kernel registers (F2). */
   api: string;

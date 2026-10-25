@@ -507,8 +507,8 @@ func TestSetAutoCompactionPersistsAndGates(t *testing.T) {
 	if section.Enabled == nil || *section.Enabled {
 		t.Errorf("persisted enabled = %v, want false", section.Enabled)
 	}
-	if _, ok := doc["env"]; !ok {
-		t.Errorf("the env block was lost on write: %s", data)
+	if _, ok := doc["providers"]; !ok {
+		t.Errorf("the providers block was lost on write: %s", data)
 	}
 
 	// A fresh resolver re-reads the gate: the persistence is real, not an

@@ -308,7 +308,7 @@ export class SessionStore {
 
   /**
    * Add a custom model (custom-model-plan.md D3): the kernel writes the
-   * credential to auth.json, the declaration to models.json — both at
+   * credential and the declaration to settings' providers — at
    * the user layer, which is cwd-independent (D8) — reloads, and answers
    * with the fresh catalog.
    *

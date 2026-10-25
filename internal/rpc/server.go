@@ -388,6 +388,16 @@ func (s *Server) dispatch(cmd RpcCommand) (RpcResponse, func()) {
 
 func (s *Server) cmdPrompt(cmd RpcCommand) (RpcResponse, func()) {
 	id := cmd.ID
+	// A prompt with no model selected is answered here rather than at the
+	// adapter: the adapter's "no model configured" is a stream-level error a
+	// client has to dig out of the event log, while this is a response the
+	// client can put in the composer's error bar. It is also the one case the
+	// RPC mode tolerates at startup — the kernel stays alive so a client can
+	// still pick a model (settings-unify-plan.md D11).
+	if st := s.host.Agent().State(); st.Model.ID == "" {
+		return errorResponse(id, CmdPrompt,
+			"No model configured. Select one (set_model), or declare a provider in settings.json."), nil
+	}
 	in, err := s.host.BuildPrompt(cmd.Message, cmd.Images)
 	if err != nil {
 		return errorResponse(id, CmdPrompt, err.Error()), nil

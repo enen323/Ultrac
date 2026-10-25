@@ -2277,3 +2277,46 @@ func TestCloneErrors(t *testing.T) {
 		t.Errorf("error = %q, want the extraction's refusal", msg)
 	}
 }
+
+// TestPromptWithoutModelIsRefused — the RPC-mode half of settings-unify-plan.md
+// D11: a kernel can come up with no model (so a client can still show a
+// picker), and its first prompt must be answered with a response the client
+// can put in the composer's error bar — not a run that reaches the adapter and
+// fails inside the event stream.
+func TestPromptWithoutModelIsRefused(t *testing.T) {
+	h := newTestHost(t, textScript("SHOULD-NOT-RUN"))
+	h.reset(ai.Model{}) // the "no model selected yet" state
+
+	// Built by hand rather than through h.serve: that helper waits for a run
+	// to settle, and the whole point here is that no run starts.
+	var out strings.Builder
+	srv := NewServer(h, transport.NewPiJSONWriter(&out))
+	defer srv.Close()
+	in := strings.NewReader(cmd("prompt", map[string]any{"id": "p1", "message": "hello"}) + "\n")
+	if err := srv.Serve(context.Background(), in); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	lines := parseLines(t, out.String())
+	if len(lines) != 1 {
+		t.Fatalf("lines = %v, want exactly one response and no events", lines)
+	}
+	r := lines[0]
+	if r["type"] != "response" {
+		t.Fatalf("line = %v, want a response", r)
+	}
+	if r["success"] != false {
+		t.Errorf("success = %v, want false", r["success"])
+	}
+	if got := rpcResponseText(r); !strings.Contains(got, "No model configured") {
+		t.Errorf("error = %q, want it to say no model is configured", got)
+	}
+}
+
+// rpcResponseText returns a failure response's message. errorResponse puts it
+// at the top level (types.go), not under data.
+func rpcResponseText(r map[string]any) string {
+	if e, ok := r["error"].(string); ok {
+		return e
+	}
+	return ""
+}

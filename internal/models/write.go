@@ -13,8 +13,8 @@ package models
 // Parse) is a genuine guard rather than a ritual: a Config that somehow
 // encodes an invalid document is refused before it reaches the disk.
 //
-// (auth.json is the opposite case — Load drops oauth entries — which is
-// why internal/config/auth has its own raw-preserving writer.)
+// (The credential files this used to sit next to were the opposite case: their
+// reader dropped oauth entries, so they needed a raw-preserving writer.)
 
 import (
 	"encoding/json"
@@ -111,8 +111,7 @@ func configHasAPIKey(cfg Config) bool {
 }
 
 // renameAttempts and renameBackoff bound the Windows retry. The facts
-// are the ones internal/config/auth's writer documents (probed on this
-// machine, plus Go's own source): os.Rename is
+// were probed on this machine and read out of Go's own source: os.Rename is
 // MoveFileEx(MOVEFILE_REPLACE_EXISTING), so replacing an existing file
 // is one atomic syscall — no remove-then-rename dance is needed — and
 // the same rename onto a file a reader still holds fails with
@@ -122,9 +121,8 @@ func configHasAPIKey(cfg Config) bool {
 // that holds longer is a real lock, and the last real error is what
 // Save reports.
 //
-// Duplicated rather than shared: models must not import
-// internal/config/auth (its layering is the other way round), and the
-// helper is twenty lines of syscall facts, not policy.
+// Kept here rather than shared: this package must not depend on a caller's
+// writer, and the helper is twenty lines of syscall facts, not policy.
 const (
 	renameAttempts = 10
 	renameBackoff  = 2 * time.Millisecond

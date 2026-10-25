@@ -1,21 +1,20 @@
 package main
 
-// configfiles.go — the models.json / auth.json section of `ultrac config`
-// (docs/开发计划/新功能计划/provider-config-plan.md P4, §4.7).
+// configfiles.go — the provider section of `ultrac config`
+// (settings-unify-plan.md, superseding provider-config-plan.md P4).
 //
 // # What it answers
 //
-// "Why did my key not work" has exactly three answers — the provider
-// declares no credential, it declares one in a file the run did not read,
-// or the file is broken — and all three are visible here or nowhere:
-// both file paths per file, every provider the files declare with its
-// base URL, model count and WHERE the credential comes from
-// (models.json / auth.json / none), the key body masked, and a .gitignore
-// reminder for the project-level files that carry secrets.
+// "Why did my key not work" has exactly three answers — the provider declares
+// no credential, it declares one in a place the run did not read, or the file
+// is broken — and all three are visible here or nowhere: the settings layer
+// that owns providers, every declared provider with its base URL, dialect,
+// model count and where the credential comes from, the key masked, and the
+// layer-ownership violations that made a provider invisible.
 //
-// The loaders are the same ones the run path uses (loadModelSnapshot /
-// loadAuthStack), so what this prints is what the next run resolves —
-// including the warnings a broken file produces.
+// It also reports the legacy models.json / auth.json files while they still
+// exist, because their presence means the run is on the fallback path and the
+// fix is one command.
 
 import (
 	"fmt"
@@ -25,83 +24,100 @@ import (
 	"sort"
 
 	"ultrac/internal/ai"
-	"ultrac/internal/config/auth"
+	"ultrac/internal/config"
 	"ultrac/internal/models"
 )
 
-// printProviderConfigSection renders the section. cwd is the working
-// directory the project layers hang off; stderr receives the same
-// file-level warnings the run path prints.
-func printProviderConfigSection(stdout, stderr io.Writer, cwd string) {
-	snap := loadModelSnapshot(cwd, stderr)
+// printProviderConfigSection renders the section. cwd is the working directory
+// the project layers hang off; layers is the stack the caller already loaded,
+// so the section cannot disagree with what the command reported above it.
+func printProviderConfigSection(stdout, stderr io.Writer, cwd string, layers []config.Layer) {
+	merged, problems := config.MergeLayers(layers)
+	providers := merged.Providers
+	snap := snapshotFromSettings(merged)
 	for _, p := range snap.Problems() {
 		fmt.Fprintf(stderr, "warning: %v\n", p)
 	}
-	stack := loadAuthStack(cwd, stderr)
-	for _, p := range stack.Problems() {
-		fmt.Fprintf(stderr, "warning: %v\n", p)
-	}
 
-	// -- models.json ------------------------------------------------------
-	fmt.Fprintln(stdout, "models.json:")
-	for _, p := range modelsFilePaths(cwd) {
-		fmt.Fprintf(stdout, "  %-14s %s (%s)\n", layerLabel(p, cwd), p, existsLabel(p))
-	}
-	declared := declaredProviders(snap)
+	// -- providers (settings.json) -----------------------------------------
+	fmt.Fprintln(stdout, "providers (settings.json):")
+	userPath := filepath.Join(config.ConfigHome(), "settings.json")
+	fmt.Fprintf(stdout, "  user layer:    %s (%s)\n", userPath, existsLabel(userPath))
+
+	declared := declaredProviders(providers)
 	if len(declared) == 0 {
 		fmt.Fprintln(stdout, "  providers: (none declared)")
 	} else {
-		fmt.Fprintln(stdout, "  providers:")
 		for _, id := range declared {
 			cfg, _ := snap.ProviderConfig(ai.ProviderId(id))
-			fmt.Fprintf(stdout, "    %s: baseUrl=%s, models=%d, credential=%s, key=%s\n",
-				id, providerBaseURL(snap, ai.ProviderId(id), cfg), providerModelCount(snap, ai.ProviderId(id)),
-				credentialSource(cfg, stack, id), credentialKey(cfg, stack, id))
+			fmt.Fprintf(stdout, "    %s: baseUrl=%s, api=%s, models=%d, credential=%s, key=%s\n",
+				id,
+				providerBaseURL(snap, ai.ProviderId(id), cfg),
+				providerAPI(snap, ai.ProviderId(id), cfg),
+				providerModelCount(snap, ai.ProviderId(id)),
+				credentialSource(cfg),
+				credentialKey(cfg))
 		}
 	}
 
-	// -- auth.json --------------------------------------------------------
-	fmt.Fprintln(stdout, "auth.json:")
-	for _, p := range authFilePaths(cwd) {
-		fmt.Fprintf(stdout, "  %-14s %s (%s)\n", layerLabel(p, cwd), p, existsLabel(p))
-	}
-	// Providers that carry an auth.json credential but declare no
-	// models.json entry: the key resolves, but nothing selects the
-	// provider by id — usually a typo, worth seeing.
-	authOnly := authOnlyProviders(snap, stack)
-	if len(authOnly) > 0 {
-		fmt.Fprintln(stdout, "  providers with a credential but no models.json entry:")
-		for _, id := range authOnly {
-			fmt.Fprintf(stdout, "    %s: credential=auth.json, key=%s\n", id, maskKey(stack.APIKey(id)))
-		}
-	}
-
-	// -- the .gitignore reminders ------------------------------------------
+	// -- layer ownership violations ----------------------------------------
 	//
-	// Both files can hold a literal key; a project-level one is one `git
-	// add .` away from a repository (plan §4.1's security boundary).
-	projectAuth := filepath.Join(cwd, ".ultrac", "auth.json")
-	if fileExists(projectAuth) {
-		fmt.Fprintf(stdout, "  note: %s holds credentials — add \".ultrac/auth.json\" to .gitignore.\n", projectAuth)
+	// A non-user layer that declared providers had them ignored (plan D4).
+	// Saying so is the whole point: otherwise the provider is simply missing
+	// with no explanation.
+	if err := config.ProviderProblemsError(problems); err != nil {
+		fmt.Fprintf(stdout, "  ignored (providers must live in the user layer):\n")
+		for _, p := range problems {
+			fmt.Fprintf(stdout, "    %s: %s\n", p.Path, joinWithComma(p.Providers))
+		}
 	}
-	projectModels := filepath.Join(cwd, ".ultrac", "models.json")
-	if fileExists(projectModels) && modelsFileHasAPIKey(snap) {
-		fmt.Fprintf(stdout, "  note: %s carries a literal apiKey — add \".ultrac/models.json\" to .gitignore.\n", projectModels)
+
+	// -- env keys that are no longer read (D11) ----------------------------
+	//
+	// A settings file that still carries the ANTHROPIC_* family is not an
+	// error — it is simply not a source any more. Printing the keys answers
+	// the one question the block above cannot: "I set ANTHROPIC_BASE_URL,
+	// why is nothing using it?"
+	effective := config.EffectiveEnv(layers)
+	if ignored := ignoredEnvKeys(effective); len(ignored) > 0 {
+		fmt.Fprintln(stdout, "  ignored env keys (not read for model or credential selection):")
+		for _, k := range ignored {
+			fmt.Fprintf(stdout, "    %s=%s\n", k, maskIfSecret(k, effective[k]))
+		}
 	}
+
 }
 
-// layerLabel names a layer file by its position: "user" for the
-// ConfigHome one, "project" for the cwd one. The paths are absolute, so
-// the label is what tells the two apart at a glance.
-func layerLabel(path, cwd string) string {
-	if filepath.Dir(path) == filepath.Join(cwd, ".ultrac") {
-		return "project layer:"
+// joinWithComma renders a provider id list for a diagnostic line.
+func joinWithComma(ids []string) string {
+	if len(ids) == 0 {
+		return "(none)"
 	}
-	return "user layer:"
+	out := ids[0]
+	for _, id := range ids[1:] {
+		out += ", " + id
+	}
+	return out
 }
 
-// existsLabel reports whether a layer file is there. ENOENT is the
-// normal case and says so plainly.
+// ignoredEnvKeys lists the settings env keys that used to configure model
+// resolution and no longer do (settings-unify-plan.md D11), in a stable order.
+//
+// They are reported rather than rejected: a settings file is shared with other
+// tools and hand-edited, and refusing to start over a stale key would be worse
+// than saying "not read".
+func ignoredEnvKeys(env map[string]string) []string {
+	var out []string
+	for _, k := range []string{config.EnvModel, config.EnvBaseURL, config.EnvAuthToken, config.EnvAPIKey} {
+		if _, ok := env[k]; ok {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// existsLabel reports whether a layer file is there. ENOENT is the normal case
+// and says so plainly.
 func existsLabel(path string) string {
 	if fileExists(path) {
 		return "found"
@@ -114,37 +130,21 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// declaredProviders lists, in lexical order, the providers the
-// models.json files declare (the merged winner per provider, D1).
-// Built-in providers without a models.json entry are not listed: the
-// catalog is not what this section is about.
-func declaredProviders(snap *models.Snapshot) []string {
-	var out []string
-	for _, p := range snap.Providers() {
-		if _, ok := snap.ProviderConfig(p); ok {
-			out = append(out, string(p))
-		}
+// declaredProviders lists, in lexical order, the providers the settings section
+// declares — including a key-only entry that declares no models[], which the
+// merged catalog alone could never show. Built-in providers with no
+// declaration are not listed: the catalog is not what this section is about.
+func declaredProviders(providers map[string]models.ProviderConfig) []string {
+	out := make([]string, 0, len(providers))
+	for id := range providers {
+		out = append(out, id)
 	}
 	sort.Strings(out)
 	return out
 }
 
-// authOnlyProviders lists providers with an auth.json credential and no
-// models.json entry, in lexical order.
-func authOnlyProviders(snap *models.Snapshot, stack *auth.Stack) []string {
-	var out []string
-	for _, id := range stack.Providers() {
-		if _, ok := snap.ProviderConfig(ai.ProviderId(id)); !ok {
-			out = append(out, id)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-// providerBaseURL is the URL a run would use for this provider: the
-// provider entry's own baseUrl when it declares one, else the first
-// (default) catalog entry's.
+// providerBaseURL is the URL a run would use for this provider: the entry's own
+// baseUrl when it declares one, else the first (default) catalog entry's.
 func providerBaseURL(snap *models.Snapshot, provider ai.ProviderId, cfg models.ProviderConfig) string {
 	if cfg.BaseURL != "" {
 		return cfg.BaseURL
@@ -155,8 +155,8 @@ func providerBaseURL(snap *models.Snapshot, provider ai.ProviderId, cfg models.P
 	return "-"
 }
 
-// providerModelCount counts the merged catalog entries for a provider
-// (built-in plus models.json upserts).
+// providerModelCount counts the merged catalog entries for a provider (built-in
+// plus the declaration's upserts).
 func providerModelCount(snap *models.Snapshot, provider ai.ProviderId) int {
 	n := 0
 	for _, m := range snap.Catalog() {
@@ -167,10 +167,9 @@ func providerModelCount(snap *models.Snapshot, provider ai.ProviderId) int {
 	return n
 }
 
-// providerAPI names the dialect in play for a declared provider: the
-// entry's own api when it sets one, else the first catalog entry's —
-// the same fallback chain modelFromJSON resolved with. add_custom_model
-// shows it under "已添加".
+// providerAPI names the dialect in play for a declared provider: the entry's
+// own api when it sets one, else the first catalog entry's — the same fallback
+// chain modelFromJSON resolved with.
 func providerAPI(snap *models.Snapshot, provider ai.ProviderId, cfg models.ProviderConfig) string {
 	if cfg.API != "" {
 		return cfg.API
@@ -178,11 +177,11 @@ func providerAPI(snap *models.Snapshot, provider ai.ProviderId, cfg models.Provi
 	if m, ok := snap.DefaultModel(provider); ok {
 		return string(m.API)
 	}
-	return ""
+	return "-"
 }
 
-// providerModelIDs lists the merged catalog ids for a provider — what
-// the picker will actually offer for it.
+// providerModelIDs lists the merged catalog ids for a provider — what the
+// picker will actually offer for it.
 func providerModelIDs(snap *models.Snapshot, provider ai.ProviderId) []string {
 	var out []string
 	for _, m := range snap.Catalog() {
@@ -190,49 +189,32 @@ func providerModelIDs(snap *models.Snapshot, provider ai.ProviderId) []string {
 			out = append(out, m.ID)
 		}
 	}
+	sort.Strings(out)
 	return out
 }
 
-// credentialSource names where the provider's key comes from — the
-// chain's order made visible (plan §4.7).
-func credentialSource(cfg models.ProviderConfig, stack *auth.Stack, provider string) string {
-	switch {
-	case cfg.APIKey != "":
-		return "models.json"
-	case stack.APIKey(provider) != "":
-		return "auth.json"
-	default:
-		return "none"
-	}
-}
-
-// credentialKey returns the masked key from whichever source has one, or
-// "-" when neither does.
-func credentialKey(cfg models.ProviderConfig, stack *auth.Stack, provider string) string {
+// credentialSource names whether the provider carries its own key. There is no
+// second source to report (D11): a provider without one fails fast at startup,
+// so "none" here is always an actionable answer.
+func credentialSource(cfg models.ProviderConfig) string {
 	if cfg.APIKey != "" {
-		return maskKey(cfg.APIKey)
+		return "settings"
 	}
-	if key := stack.APIKey(provider); key != "" {
-		return maskKey(key)
-	}
-	return "-"
+	return "none"
 }
 
-// modelsFileHasAPIKey reports whether any declared provider carries a
-// literal apiKey — the condition for the models.json .gitignore note.
-func modelsFileHasAPIKey(snap *models.Snapshot) bool {
-	for _, p := range snap.Providers() {
-		if cfg, ok := snap.ProviderConfig(p); ok && cfg.APIKey != "" {
-			return true
-		}
+// credentialKey returns the masked key from whichever source has one, or "-".
+func credentialKey(cfg models.ProviderConfig) string {
+	if cfg.APIKey == "" {
+		return "-"
 	}
-	return false
+	return maskKey(cfg.APIKey)
 }
 
 // maskKey hides a credential's body. The field name is shaped to hit
-// maskIfSecret's secret patterns (anything ending in _KEY), so the
-// masking rule stays in that one function; a credential is always
-// masked, whatever the field is called.
+// maskIfSecret's secret patterns (anything ending in _KEY), so the masking rule
+// stays in that one function; a credential is always masked, whatever the field
+// is called and whatever prefix it happens to use.
 func maskKey(value string) string {
 	return maskIfSecret("api_key", value)
 }

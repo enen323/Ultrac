@@ -1,23 +1,24 @@
 // custommodel_test.go — the add_custom_model persistence regression
-// (custom-model-plan.md P6, G6): the real "write → restart → read back"
-// path, no mocks.
+// (custom-model-plan.md P6/G6, re-pointed at settings by
+// settings-unify-plan.md P3).
 //
-// What it pins down is D8's two premises, either of which can be broken
-// silently ("it works on my machine"): both files are written at the
-// USER layer (ConfigHome), and the startup path re-reads them. The test
-// therefore builds a second harness from the same files with nothing
-// shared — new resolver, new snapshot, new closures — and asserts the
-// model is there and its key resolves. A write to the project layer, or
-// a snapshot that stops reloading, turns this red.
+// What it pins down is the premise that can break silently ("it works on my
+// machine"): the declaration AND its credential land in the USER layer's
+// settings, and the startup path re-reads them. The test therefore builds a
+// second harness from the same files with nothing shared — new resolver, new
+// snapshot, new closures — and asserts the model is there and its key resolves.
+// A write to the project layer, or a snapshot that stops reloading, turns this
+// red.
 //
-// It also witnesses the in-process half (D4): the live harness sees the
-// new model and credential without a restart, because reloadModels
-// swapped the pointer the per-request resolver reads.
+// It also witnesses the in-process half (D4): the live harness sees the new
+// model and credential without a restart, because reloadConfig swapped the
+// pointer the per-request resolver reads.
 
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -25,7 +26,7 @@ import (
 	"testing"
 
 	"ultrac/internal/ai"
-	"ultrac/internal/config/auth"
+	"ultrac/internal/config"
 	"ultrac/internal/models"
 	"ultrac/internal/rpc"
 )
@@ -42,6 +43,21 @@ func customSpec() rpc.CustomModelSpec {
 		ContextWindow: 128000,
 		MaxTokens:     8192,
 	}
+}
+
+// providersOnDisk reads the providers section of the user settings file — the
+// one place a declaration can live since settings-unify-plan.md.
+func providersOnDisk(t *testing.T, home string) map[string]models.ProviderConfig {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(home, "settings.json"))
+	if err != nil {
+		t.Fatalf("read settings.json: %v", err)
+	}
+	var s config.Settings
+	if err := json.Unmarshal(raw, &s); err != nil {
+		t.Fatalf("parse settings.json: %v", err)
+	}
+	return s.Providers
 }
 
 func TestAddCustomModelPersistsAcrossRestart(t *testing.T) {
@@ -79,13 +95,18 @@ func TestAddCustomModelPersistsAcrossRestart(t *testing.T) {
 		t.Errorf("limits = (%d, %d), want (%d, %d)",
 			added.ContextWindow, added.MaxTokens, spec.ContextWindow, spec.MaxTokens)
 	}
-	if len(result.Providers) != 1 {
-		t.Fatalf("result.providers = %+v, want exactly the declared provider", result.Providers)
+	var info *rpc.CustomModelProviderInfo
+	for i := range result.Providers {
+		if result.Providers[i].ID == spec.Provider {
+			info = &result.Providers[i]
+		}
 	}
-	info := result.Providers[0]
-	if info.ID != spec.Provider || info.BaseURL != spec.BaseURL ||
+	if info == nil {
+		t.Fatalf("result.providers has no %q: %+v", spec.Provider, result.Providers)
+	}
+	if info.BaseURL != spec.BaseURL ||
 		info.API != spec.API || len(info.ModelIDs) != 1 || info.ModelIDs[0] != spec.ModelID {
-		t.Errorf("provider info = %+v, want the declaration", info)
+		t.Errorf("provider info = %+v, want the declaration", *info)
 	}
 
 	// -- the in-process half (D4) -----------------------------------------
@@ -96,31 +117,37 @@ func TestAddCustomModelPersistsAcrossRestart(t *testing.T) {
 		t.Errorf("credentialFor(%q) = %q, want the key just written", spec.Provider, got)
 	}
 
-	// -- the files, at the user layer (D8) --------------------------------
-	authPath := filepath.Join(env.home, "auth.json")
-	modelsPath := filepath.Join(env.home, "models.json")
-	if !fileExists(modelsPath) || !fileExists(authPath) {
-		t.Fatalf("both files must exist under %s", env.home)
+	// -- the file: one place, user layer ----------------------------------
+	//
+	// The declaration and the key are one entry now. The old split (key in
+	// auth.json, URL in models.json) is what let a key drift away from the
+	// endpoint it belongs to, so the separation is asserted AGAINST here.
+	providers := providersOnDisk(t, env.home)
+	entry, ok := providers[spec.Provider]
+	if !ok {
+		t.Fatalf("no %q provider in settings.json", spec.Provider)
 	}
-	// D1: the key is in auth.json and nowhere in models.json.
-	stack := auth.LoadStack([]string{authPath}, func(err error) { t.Errorf("auth: %v", err) })
-	if got := stack.APIKey(spec.Provider); got != spec.APIKey {
-		t.Errorf("auth.json key = %q, want %q", got, spec.APIKey)
+	if entry.BaseURL != spec.BaseURL || entry.API != spec.API {
+		t.Errorf("entry = %+v, want the spec's endpoint and dialect", entry)
 	}
-	if strings.Contains(readFile(t, modelsPath), spec.APIKey) {
-		t.Error("models.json must not carry the apiKey (D1)")
+	if entry.APIKey != spec.APIKey {
+		t.Errorf("entry.apiKey = %q, want the written key in the same entry", entry.APIKey)
 	}
-	// The declaration round-trips through the struct writer.
-	cfg, err := models.Load(modelsPath)
-	if err != nil {
-		t.Fatalf("models.Load: %v", err)
+	if len(entry.Models) != 1 || entry.Models[0].ID != spec.ModelID {
+		t.Errorf("entry.models = %+v, want just %q", entry.Models, spec.ModelID)
 	}
-	entry, ok := cfg.Providers[spec.Provider]
-	if !ok || entry.BaseURL != spec.BaseURL || entry.API != spec.API || len(entry.Models) != 1 {
-		t.Fatalf("models.json provider = %+v, want the declaration", entry)
+	// The legacy files must not be created by this flow any more.
+	for _, legacy := range []string{"models.json", "auth.json"} {
+		if fileExists(filepath.Join(env.home, legacy)) {
+			t.Errorf("%s was written: the unify migration made it obsolete", legacy)
+		}
 	}
-	if entry.Models[0].ID != spec.ModelID {
-		t.Errorf("models.json model = %q, want %q", entry.Models[0].ID, spec.ModelID)
+	// The settings file keeps whatever else it had (the fixture's own
+	// provider), proving the write goes through the preserving marshal rather
+	// than rewriting the document from the struct alone.
+	raw := readFile(t, filepath.Join(env.home, "settings.json"))
+	if !strings.Contains(raw, `"deepseek"`) {
+		t.Errorf("settings.json lost the pre-existing provider on write:\n%s", raw)
 	}
 
 	// -- the restart: nothing shared, everything re-read ------------------
@@ -129,18 +156,18 @@ func TestAddCustomModelPersistsAcrossRestart(t *testing.T) {
 		t.Fatalf("second buildHarness exit = %d, want 0", code)
 	}
 	if !containsModel(h2.availableModels(), added) {
-		t.Error("a fresh harness must offer the model written before it (D8)")
+		t.Error("a fresh harness must offer the model written before it")
 	}
 	if got := h2.credentialFor(spec.Provider); got != spec.APIKey {
 		t.Errorf("after restart credentialFor(%q) = %q, want the written key", spec.Provider, got)
 	}
 }
 
-// TestAddCustomModelUpsertsSameProvider — a second add for the same
-// provider id extends it rather than duplicating it: the merge rule at
-// load time is an upsert by model id, so the file must be one too. The
-// endpoint and dialect already declared win (the user may have tuned
-// them by hand), and a re-saved model keeps its display name.
+// TestAddCustomModelUpsertsSameProvider — a second add for the same provider id
+// extends it rather than duplicating it: the merge rule at load time is an
+// upsert by model id, so the file must be one too. The endpoint and dialect
+// already declared win (the user may have tuned them by hand), and a re-saved
+// model keeps its display name.
 func TestAddCustomModelUpsertsSameProvider(t *testing.T) {
 	env := newPrintEnv(t)
 	h, code := buildHarness(env.flags, env.cwd, io.Discard, env.provider.streamFn)
@@ -167,13 +194,9 @@ func TestAddCustomModelUpsertsSameProvider(t *testing.T) {
 		t.Fatalf("third AddCustomModel: %v", err)
 	}
 
-	cfg, err := models.Load(filepath.Join(env.home, "models.json"))
-	if err != nil {
-		t.Fatalf("models.Load: %v", err)
-	}
-	entry, ok := cfg.Providers[first.Provider]
+	entry, ok := providersOnDisk(t, env.home)[first.Provider]
 	if !ok {
-		t.Fatalf("provider %q missing from models.json", first.Provider)
+		t.Fatalf("provider %q missing from settings.json", first.Provider)
 	}
 	if len(entry.Models) != 2 {
 		t.Fatalf("models = %d, want 2 (an upsert, not an append)", len(entry.Models))
@@ -203,10 +226,27 @@ func TestAddCustomModelUpsertsSameProvider(t *testing.T) {
 	}
 }
 
+// TestAddCustomModelNormalizesBaseURL — a pasted full endpoint is trimmed to
+// API-root level, because the adapters append their own path
+// (settings-unify-plan.md D10). Without this the request goes to
+// /chat/completions/chat/completions and 404s against a perfectly good key.
+func TestAddCustomModelNormalizesBaseURL(t *testing.T) {
+	cases := map[string]string{
+		"https://api.stepfun.com/step_plan/v1/chat/completions": "https://api.stepfun.com/step_plan/v1",
+		"https://api.deepseek.com/anthropic/v1/messages":        "https://api.deepseek.com/anthropic",
+		"https://api.deepseek.com/anthropic/":                   "https://api.deepseek.com/anthropic",
+		"https://api.openai.com/v1":                             "https://api.openai.com/v1",
+	}
+	for in, want := range cases {
+		if got := normalizeBaseURL(in); got != want {
+			t.Errorf("normalizeBaseURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // TestAddCustomModelRejectsBadSpec — the host's own entry point refuses a
-// malformed spec before touching either file. The protocol layer checks
-// the same rules; this is what keeps a direct caller (this package's
-// tests, a future CLI command) from writing half a provider.
+// malformed spec before touching the file. The protocol layer checks the same
+// rules; this is what keeps a direct caller from writing half a provider.
 func TestAddCustomModelRejectsBadSpec(t *testing.T) {
 	env := newPrintEnv(t)
 	h, code := buildHarness(env.flags, env.cwd, io.Discard, env.provider.streamFn)
@@ -225,9 +265,11 @@ func TestAddCustomModelRejectsBadSpec(t *testing.T) {
 	if _, err := host.AddCustomModel(bad); err == nil {
 		t.Fatal("an empty modelId must be refused")
 	}
-	// Nothing reached the disk: no orphan credential, no half declaration.
-	if fileExists(filepath.Join(env.home, "auth.json")) || fileExists(filepath.Join(env.home, "models.json")) {
-		t.Fatal("a refused spec must not write either file")
+	// Nothing reached the disk: the refused provider is absent, and the
+	// fixture's own provider is untouched.
+	onDisk := providersOnDisk(t, env.home)
+	if _, ok := onDisk[customSpec().Provider]; ok {
+		t.Fatalf("a refused spec wrote providers: %+v", onDisk)
 	}
 }
 

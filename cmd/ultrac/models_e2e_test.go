@@ -29,19 +29,10 @@ import (
 	"testing"
 )
 
-func TestPrintWithModelsJSONProviderEndToEnd(t *testing.T) {
+func TestPrintWithDeclaredProviderEndToEnd(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
 	t.Setenv("ULTRAC_CONFIG_DIR", home)
-
-	// Settings carry only the credential. No ANTHROPIC_MODEL and no
-	// ANTHROPIC_BASE_URL: the settings block chooses neither a model nor
-	// an endpoint, so the models.json entry's declared dialect resolves
-	// (the "直接可用" shape from the plan's goal statement).
-	if err := os.WriteFile(filepath.Join(home, "settings.json"),
-		[]byte(`{"env":{"ANTHROPIC_AUTH_TOKEN":"sk-fake-proxy-key"}}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
 	// The fake endpoint speaks the Chat Completions dialect and records
 	// what arrived: the credential, the provider header from models.json,
@@ -61,14 +52,15 @@ func TestPrintWithModelsJSONProviderEndToEnd(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// The user-layer models.json: one provider, one model, pointing at the
-	// fake endpoint, declaring the openai dialect and a custom header.
-	modelsJSON := `{
+	// The user-layer settings: one provider, one model, pointing at the fake
+	// endpoint, declaring the openai dialect, its own key and a custom header.
+	settingsJSON := `{
       "providers": {
         "my-proxy": {
           "name": "My Proxy",
           "baseUrl": "` + srv.URL + `",
           "api": "openai-completions",
+          "apiKey": "sk-e2e-proxy",
           "headers": { "X-Proxy": "ultrac-e2e" },
           "models": [
             { "id": "xxx", "name": "Proxy Model",
@@ -78,7 +70,7 @@ func TestPrintWithModelsJSONProviderEndToEnd(t *testing.T) {
         }
       }
     }`
-	if err := os.WriteFile(filepath.Join(home, "models.json"), []byte(modelsJSON), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(home, "settings.json"), []byte(settingsJSON), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -99,22 +91,20 @@ func TestPrintWithModelsJSONProviderEndToEnd(t *testing.T) {
 	if stdout.String() != "PROXY-OK\n" {
 		t.Errorf("stdout = %q, want the fake endpoint's answer", stdout.String())
 	}
-	// The settings-env credential reached the wire as the provider's
-	// Bearer token. my-proxy declares no apiKey and has no auth.json
-	// entry, so this is the chain's last-resort fallback — the pre-P3
-	// path kept working unchanged (D6). The chain itself (auth.json's
-	// literal key, no env token anywhere) is covered by
-	// auth_e2e_test.go.
-	if gotAuth != "Bearer sk-fake-proxy-key" {
-		t.Errorf("authorization = %q, want the settings token", gotAuth)
+	// The provider entry's own apiKey reached the wire as the Bearer token.
+	// It has to: there is no env fallback any more
+	// (settings-unify-plan.md D11), so a provider that declares no key simply
+	// cannot authenticate.
+	if gotAuth != "Bearer sk-e2e-proxy" {
+		t.Errorf("authorization = %q, want the provider's own apiKey", gotAuth)
 	}
-	// The models.json provider header rode on the model entry and reached
-	// the wire — the adapter wiring P1 verified first.
+	// The provider's custom header rode on the model entry and reached the
+	// wire — the adapter wiring P1 verified first.
 	if gotProxy != "ultrac-e2e" {
-		t.Errorf("X-Proxy = %q, want the models.json header", gotProxy)
+		t.Errorf("X-Proxy = %q, want the provider's header", gotProxy)
 	}
 	if gotModel != "xxx" {
-		t.Errorf("request model = %q, want xxx (the models.json id)", gotModel)
+		t.Errorf("request model = %q, want xxx (the declared id)", gotModel)
 	}
 }
 

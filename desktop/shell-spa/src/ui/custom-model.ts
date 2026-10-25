@@ -91,7 +91,7 @@ function urlHost(baseUrl: string): string {
  * Derive the provider id from a baseUrl: the host with dots (and a
  * non-default port's colon) as dashes ("api.deepseek.com" →
  * "api-deepseek-com", "localhost:11434" → "localhost-11434"). It is the
- * models.json key and set_model's "provider/" part, so it must be a
+ * providers key and set_model's "provider/" part, so it must be a
  * stable, legal id — a host contains neither "/" nor whitespace, which
  * is exactly what the kernel's validation demands of the field.
  */
@@ -145,7 +145,7 @@ export function validateForm(form: CustomModelForm): Record<string, string> {
   if (!form.modelId.trim()) {
     errors.modelId = "模型 id 必填";
   }
-  // The explicit id must be a legal models.json key: no "/" (it is
+  // The explicit id must be a legal provider id: no "/" (it is
   // set_model's separator) and no whitespace. The derived one is legal
   // by construction — a host contains neither.
   const provider = form.provider.trim();

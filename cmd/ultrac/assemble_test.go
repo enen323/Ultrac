@@ -109,99 +109,161 @@ func TestUserMessageWithImages(t *testing.T) {
 	}
 }
 
-func TestAvailableModelsIncludeSettingsModel(t *testing.T) {
-	h := testHarness(t)
-	models := h.availableModels()
-	if len(models) == 0 {
-		t.Fatal("availableModels is empty")
-	}
-	// The settings-resolved model must be selectable even when the
-	// handwritten catalog has not caught up (pi's model runtime snapshot
-	// works the same way, rpc-mode.ts:471).
-	cfg := h.cfg.Load()
-	resolved, err := resolveModel(cfg.snapshot, "", "", cfg.effective)
-	if err != nil {
-		t.Fatalf("resolveModel: %v", err)
-	}
-	if !containsModel(models, resolved) {
-		t.Errorf("settings model %s/%s missing from %d entries", resolved.Provider, resolved.ID, len(models))
-	}
-}
-
-// TestHarnessCredentialResolvesPerProvider — P3's wiring at the harness
-// level: the credential resolver the agent loop calls per request uses
-// the provider parameter. models.json's apiKey is step one, auth.json is
-// step two, and a provider with neither still gets the settings env
-// token — the pre-P3 path, preserved as the last-resort fallback (D6).
-// The chain always beats the env token: from-models resolves to its own
-// key even though the settings block carries one.
-func TestHarnessCredentialResolvesPerProvider(t *testing.T) {
+func TestAvailableModelsCarriesDeclaredProviders(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
 	t.Setenv("ULTRAC_CONFIG_DIR", home)
 
-	writeFile(t, filepath.Join(home, "settings.json"), `{"env": {
-		"ANTHROPIC_AUTH_TOKEN": "sk-env-token",
-		"ANTHROPIC_MODEL": "deepseek-chat"
-	}}`)
-	writeFile(t, filepath.Join(home, "models.json"), `{
-		"providers": {
-			"from-models": {
-				"baseUrl": "https://a.example.com/v1",
-				"api": "openai-completions",
-				"apiKey": "sk-models",
-				"models": [
-					{"id": "m1", "cost": {"input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 1}}
-				]
-			}
-		}
-	}`)
-	writeFile(t, filepath.Join(home, "auth.json"), `{
-		"from-auth": {"type": "api_key", "key": "sk-auth"}
-	}`)
+	writeFile(t, filepath.Join(home, "settings.json"), `{
+      "providers": {
+        "my-proxy": {
+          "baseUrl": "https://proxy.example.com/v1",
+          "api": "openai-completions",
+          "apiKey": "sk-x",
+          "models": [{"id": "my-model"}]
+        }
+      }
+    }`)
 
-	h, code := buildHarness(&agentFlags{Mode: "text"}, cwd, io.Discard, nil)
+	h, code := buildHarness(&agentFlags{Mode: "text", Model: "my-proxy/my-model"}, cwd, io.Discard, nil)
 	if code != 0 {
 		t.Fatalf("buildHarness exit = %d, want 0", code)
 	}
-	if h.cfg.Load() == nil {
-		t.Fatal("the harness must carry a resolved config (P3/D4)")
+	// The picker's list is the merged catalog: a declared provider's model is
+	// in it, and the built-ins are too.
+	found := false
+	for _, m := range h.availableModels() {
+		if m.Provider == ai.ProviderId("my-proxy") && m.ID == "my-model" {
+			found = true
+		}
 	}
-	if got := h.credentialFor("from-models"); got != "sk-models" {
-		t.Errorf("credentialFor(from-models) = %q, want the models.json key", got)
+	if !found {
+		t.Errorf("declared model missing from %d available entries", len(h.availableModels()))
 	}
-	if got := h.credentialFor("from-auth"); got != "sk-auth" {
-		t.Errorf("credentialFor(from-auth) = %q, want the auth.json key", got)
-	}
-	if got := h.credentialFor("deepseek"); got != "sk-env-token" {
-		t.Errorf("credentialFor(deepseek) = %q, want the settings env token (the unaffected path)", got)
-	}
-	if got := h.credentialFor("nobody"); got != "sk-env-token" {
-		t.Errorf("credentialFor(nobody) = %q, want the settings env token", got)
-	}
-	// The startup model resolved through the same resolver, so the
-	// fail-fast below could not have fired with these files present.
-	if got := h.credentialFor(string(h.model.Provider)); got == "" {
-		t.Error("the startup model's provider must resolve to a credential")
+	if !containsModel(h.availableModels(), ai.WithDefaults(ai.Model{
+		Provider: ai.ProviderDeepseek, ID: "deepseek-chat",
+	})) {
+		t.Error("the built-in catalog must survive")
 	}
 }
 
-// TestBuildHarnessFailsFastPerProvider — the P3 startup check: a model
-// whose provider has no credential anywhere exits 1 with guidance that
-// names the provider and points at the files the chain reads. The old
-// "no credential is configured" wording stays as the lead (print_test's
-// TestPrintNoCredential asserts on it); the body is the per-provider
-// upgrade the plan asks for.
+// TestHarnessCredentialComesOnlyFromTheProviderEntry — D11 at the harness
+// level: the env block still carrying ANTHROPIC_AUTH_TOKEN changes nothing. A
+// provider without its own key resolves to "", which is what the startup
+// fail-fast and the per-request GetAPIKey both see.
+func TestHarnessCredentialComesOnlyFromTheProviderEntry(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("ULTRAC_CONFIG_DIR", home)
+
+	writeFile(t, filepath.Join(home, "settings.json"), `{
+      "env": {
+        "ANTHROPIC_AUTH_TOKEN": "sk-env-token",
+        "ANTHROPIC_MODEL": "deepseek-chat",
+        "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic"
+      },
+      "providers": {
+        "with-key": {
+          "baseUrl": "https://a.example.com/v1",
+          "api": "openai-completions",
+          "apiKey": "sk-with-key",
+          "models": [{"id": "m1"}]
+        },
+        "no-key": {
+          "baseUrl": "https://b.example.com/v1",
+          "api": "openai-completions",
+          "models": [{"id": "m2"}]
+        }
+      }
+    }`)
+
+	h, code := buildHarness(&agentFlags{Mode: "text", Model: "with-key/m1"}, cwd, io.Discard, nil)
+	if code != 0 {
+		t.Fatalf("buildHarness exit = %d, want 0", code)
+	}
+	if got := h.credentialFor("with-key"); got != "sk-with-key" {
+		t.Errorf("credentialFor(with-key) = %q, want the declared key", got)
+	}
+	// No fallback of any kind: not the env token, not another provider's key.
+	if got := h.credentialFor("no-key"); got != "" {
+		t.Errorf("credentialFor(no-key) = %q, want empty (no env fallback)", got)
+	}
+	if got := h.credentialFor("deepseek"); got != "" {
+		t.Errorf("credentialFor(deepseek) = %q, want empty even though env has a token", got)
+	}
+	if got := h.credentialFor(string(h.model.Provider)); got != "sk-with-key" {
+		t.Errorf("the startup model's provider = %q, want the declared key", got)
+	}
+}
+
+// TestBuildHarnessNoModelIsCliError — with no --model and no session model,
+// a CLI run exits 2 with the guidance that names the only source.
+func TestBuildHarnessNoModelIsCliError(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("ULTRAC_CONFIG_DIR", home)
+	// An env block naming a model must not rescue this: it is not a source
+	// any more (D11).
+	writeFile(t, filepath.Join(home, "settings.json"), `{
+      "env": {"ANTHROPIC_MODEL": "deepseek-chat", "ANTHROPIC_AUTH_TOKEN": "sk-env"}
+    }`)
+
+	var stderr strings.Builder
+	h, code := buildHarness(&agentFlags{Mode: "text"}, cwd, &stderr, nil)
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (no model named)", code)
+	}
+	if h != nil {
+		t.Error("no harness should be returned without a model")
+	}
+	msg := stderr.String()
+	if !strings.Contains(msg, "no model configured") {
+		t.Errorf("stderr = %q, want the no-model wording", msg)
+	}
+	if !strings.Contains(msg, "--model") || !strings.Contains(msg, `"providers"`) {
+		t.Errorf("stderr = %q, want it to name both sources", msg)
+	}
+}
+
+// TestBuildHarnessNoModelKeepsRPCAlive — the same situation in RPC mode is a
+// state, not a failure: the desktop shell needs a live kernel to show a model
+// picker, so the harness comes up with an empty model and cmdPrompt answers
+// "no model configured" until set_model arrives.
+func TestBuildHarnessNoModelKeepsRPCAlive(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("ULTRAC_CONFIG_DIR", home)
+	writeFile(t, filepath.Join(home, "settings.json"), `{}`)
+
+	var stderr strings.Builder
+	h, code := buildHarness(&agentFlags{Mode: "rpc"}, cwd, &stderr, nil)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (RPC mode tolerates no model)", code)
+	}
+	if h == nil {
+		t.Fatal("a harness must come up so a client can still select a model")
+	}
+	if h.model.ID != "" {
+		t.Errorf("model = %+v, want the empty model", h.model)
+	}
+	if len(h.availableModels()) == 0 {
+		t.Error("the built-in catalog must still be offered by the picker")
+	}
+}
+
+// TestBuildHarnessFailsFastPerProvider — a model whose provider declares no
+// credential exits 1 with guidance that names the provider and the one place a
+// key can live.
 func TestBuildHarnessFailsFastPerProvider(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
 	t.Setenv("ULTRAC_CONFIG_DIR", home)
-	// No env token, no models.json, no auth.json: the settings block
-	// names the model and nothing else.
-	writeFile(t, filepath.Join(home, "settings.json"), `{"env": {"ANTHROPIC_MODEL": "deepseek-chat"}}`)
+	// No providers at all, but the model is named on the command line: it
+	// resolves from the built-in catalog and has no key.
+	writeFile(t, filepath.Join(home, "settings.json"), `{"env": {}}`)
 
 	var stderr strings.Builder
-	h, code := buildHarness(&agentFlags{Mode: "text"}, cwd, &stderr, nil)
+	h, code := buildHarness(&agentFlags{Mode: "text", Model: "deepseek/deepseek-chat"}, cwd, &stderr, nil)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 (no credential anywhere)", code)
 	}
@@ -212,8 +274,13 @@ func TestBuildHarnessFailsFastPerProvider(t *testing.T) {
 	if !strings.Contains(msg, `no credential is configured for provider "deepseek"`) {
 		t.Errorf("stderr = %q, want the per-provider wording", msg)
 	}
-	if !strings.Contains(msg, "auth.json") {
-		t.Errorf("stderr = %q, want the auth.json guidance", msg)
+	// The guidance names the one place a key can now live, and says the env
+	// fallback is gone (settings-unify-plan.md D4/D11).
+	if !strings.Contains(msg, `"providers"`) || !strings.Contains(msg, "settings.json") {
+		t.Errorf("stderr = %q, want the providers-section guidance", msg)
+	}
+	if strings.Contains(msg, "auth.json") {
+		t.Errorf("stderr = %q, still points at the deleted auth.json path", msg)
 	}
 }
 

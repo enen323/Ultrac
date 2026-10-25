@@ -74,13 +74,14 @@ export function ModelPicker({
       </label>
       <select
         id="model-select"
-        value={model ? optionValue(model) : ""}
+        value={model?.id ? optionValue(model) : ""}
         onChange={(event) => {
           const entry = models.find((candidate) => optionValue(candidate) === event.target.value);
           if (entry) onSetModel(entry.provider, entry.id);
         }}
       >
-        {model && !hasCurrent && <option value={optionValue(model)}>{model.name}</option>}
+        {model?.id && !hasCurrent && <option value={optionValue(model)}>{model.name}</option>}
+        {!model?.id && <option value="">未配置模型</option>}
         {[...groups].map(([provider, entries]) => (
           <optgroup key={provider} label={provider}>
             {entries.map((entry) => (

@@ -125,6 +125,15 @@ func apiNames() []string {
 // almost always a filter — host management, or the safe allowlist — visible
 // right here rather than inferred later.
 func runConfig(args []string, stdout, stderr io.Writer) int {
+	// `ultrac config` has no subcommands. Naming one (a stale `migrate` in a
+	// script, say) is a mistake worth reporting rather than silently ignoring:
+	// the command would otherwise print the whole stack and exit 0, looking
+	// like it did something.
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		fmt.Fprintf(stderr, "ultrac config: unknown argument %q (no subcommands)\n", args[0])
+		return 2
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(stderr, "ultrac config: %v\n", err)
@@ -160,7 +169,19 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 		if l.Settings.Compaction != nil {
 			fmt.Fprintf(stdout, "    (compaction section: %s)\n", formatCompaction(l.Settings.Compaction))
 		}
-		if len(l.Settings.Env) == 0 && len(l.Settings.Extra) == 0 && l.Settings.Compaction == nil {
+		if len(l.Settings.Providers) > 0 {
+			// Names, not a byte count: this section holds credentials, and a
+			// user reading `ultrac config` is asking "which providers does
+			// this layer own", not "how big is the blob".
+			ids := make([]string, 0, len(l.Settings.Providers))
+			for id := range l.Settings.Providers {
+				ids = append(ids, id)
+			}
+			sort.Strings(ids)
+			fmt.Fprintf(stdout, "    (providers section: %s)\n", strings.Join(ids, ", "))
+		}
+		if len(l.Settings.Env) == 0 && len(l.Settings.Extra) == 0 &&
+			l.Settings.Compaction == nil && len(l.Settings.Providers) == 0 {
 			fmt.Fprintln(stdout, "    (empty)")
 		}
 	}
@@ -193,11 +214,10 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	// The provider-config files (P4): where models.json and auth.json
-	// live, what the user's providers declare, and where each one's
-	// credential comes from — the question "why did my key not work" is
-	// answered here or nowhere.
-	printProviderConfigSection(stdout, stderr, cwd)
+	// The provider section: which settings layer owns providers, what they
+	// declare, and where each one's credential comes from — the question
+	// "why did my key not work" is answered here or nowhere.
+	printProviderConfigSection(stdout, stderr, cwd, layers)
 
 	if loadErr != nil {
 		fmt.Fprintf(stderr, "\nwarning: %v\n", loadErr)

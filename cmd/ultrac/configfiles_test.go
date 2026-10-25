@@ -1,174 +1,178 @@
 package main
 
-// Tests for the models.json / auth.json section of `ultrac config`
-// (provider-config-plan.md P4, §4.7): both paths per file, the
-// per-provider summary with its credential source, the masked key, and
-// the .gitignore reminders for project-level files that carry secrets.
+// Tests for the provider section of `ultrac config`
+// (settings-unify-plan.md, superseding provider-config-plan.md P4).
+//
+// Three answers matter and each has a test: what the user layer declares (with
+// the key masked), which non-user layers were ignored and why, and the empty
+// case. The masked-key assertion is a security test, not a formatting one: an
+// unmasked key in a terminal or a pasted log is a leak.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"ultrac/internal/config"
 )
 
-func TestPrintProviderConfigSection(t *testing.T) {
+// settingsLayers loads the real layer stack for cwd, the way `ultrac config`
+// does. Using the resolver rather than hand-built Layers keeps the test honest
+// about which files back which source.
+func settingsLayers(t *testing.T, cwd string) []config.Layer {
+	t.Helper()
+	r := config.NewFileResolver()
+	layers, _ := r.Layers(context.Background(), cwd)
+	return layers
+}
+
+func TestProviderConfigSectionShowsDeclaredProviders(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
 	t.Setenv("ULTRAC_CONFIG_DIR", home)
 
-	// User layer: one provider with its own apiKey.
-	writeFile(t, filepath.Join(home, "models.json"), `{
+	writeFile(t, filepath.Join(home, "settings.json"), `{
+      "env": {"ANTHROPIC_MODEL": "deepseek-flash"},
+      "hooks": {"Stop": [{"command": "echo done"}]},
       "providers": {
-        "from-models": {
-          "baseUrl": "https://a.example.com/v1",
+        "api-stepfun-com": {
+          "baseUrl": "https://api.stepfun.com/step_plan/v1",
           "api": "openai-completions",
-          "apiKey": "sk-super-secret-models-key",
+          "apiKey": "6CRS-super-secret-stepfun-key",
           "models": [
-            { "id": "m1", "cost": { "input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 1 } },
-            { "id": "m2", "cost": { "input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 1 } }
+            { "id": "step-5-preview", "contextWindow": 128000, "maxTokens": 8192 }
           ]
         }
       }
     }`)
-	// User layer auth.json: a key for a built-in provider (deepseek),
-	// which declares no models.json entry.
-	writeFile(t, filepath.Join(home, "auth.json"),
-		`{"deepseek": {"type": "api_key", "key": "sk-deepseek-auth-key"}}`)
-
-	// Project layer: a provider with no credential anywhere, and a
-	// project auth.json carrying one for it.
-	if err := os.MkdirAll(filepath.Join(cwd, ".ultrac"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeFile(t, filepath.Join(cwd, ".ultrac", "models.json"), `{
-      "providers": {
-        "no-key": {
-          "baseUrl": "https://b.example.com/v1",
-          "api": "openai-completions",
-          "models": [
-            { "id": "n1", "cost": { "input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 1 } }
-          ]
-        }
-      }
-    }`)
-	writeFile(t, filepath.Join(cwd, ".ultrac", "auth.json"),
-		`{"no-key": {"type": "api_key", "key": "sk-project-no-key-key"}}`)
 
 	var stdout, stderr strings.Builder
-	printProviderConfigSection(&stdout, &stderr, cwd)
+	printProviderConfigSection(&stdout, &stderr, cwd, settingsLayers(t, cwd))
 	out := stdout.String()
 
-	// Both paths per file, labelled.
 	for _, want := range []string{
-		"models.json:",
-		"user layer:    " + filepath.Join(home, "models.json") + " (found)",
-		"project layer: " + filepath.Join(cwd, ".ultrac", "models.json") + " (found)",
-		"auth.json:",
-		"user layer:    " + filepath.Join(home, "auth.json") + " (found)",
-		"project layer: " + filepath.Join(cwd, ".ultrac", "auth.json") + " (found)",
+		"providers (settings.json):",
+		"user layer:    " + filepath.Join(home, "settings.json") + " (found)",
+		"api-stepfun-com:",
+		"baseUrl=https://api.stepfun.com/step_plan/v1",
+		"api=openai-completions",
+		"models=1",
+		"credential=settings",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
 	}
 
-	// The per-provider summary: baseUrl, model count, credential source.
-	if !strings.Contains(out, "from-models: baseUrl=https://a.example.com/v1, models=2, credential=models.json,") {
-		t.Errorf("from-models summary wrong:\n%s", out)
+	// The key is masked, and its body never reaches the terminal. maskKey
+	// keeps six characters; this key is not "sk-"-prefixed, which is exactly
+	// the case a prefix-based mask would have missed.
+	if strings.Contains(out, "6CRS-super-secret-stepfun-key") {
+		t.Errorf("the full apiKey was printed:\n%s", out)
 	}
-	if !strings.Contains(out, "no-key: baseUrl=https://b.example.com/v1, models=1, credential=auth.json,") {
-		t.Errorf("no-key summary wrong:\n%s", out)
-	}
-	// The masked key: enough to recognise, not enough to use.
-	if !strings.Contains(out, "key=sk-sup***") {
-		t.Errorf("the models.json key must be masked, not dropped:\n%s", out)
-	}
-	// The key bodies must not reach the terminal.
-	for _, secret := range []string{
-		"sk-super-secret-models-key",
-		"sk-deepseek-auth-key",
-		"sk-project-no-key-key",
-	} {
-		if strings.Contains(out, secret) {
-			t.Errorf("output leaks the credential %q:\n%s", secret, out)
-		}
-	}
-	// The .gitignore reminders: the project auth.json always, the
-	// project models.json because a provider carries an apiKey.
-	if !strings.Contains(out, `add ".ultrac/auth.json" to .gitignore`) {
-		t.Errorf("the project auth.json must prompt .gitignore:\n%s", out)
-	}
-	if !strings.Contains(out, `add ".ultrac/models.json" to .gitignore`) {
-		t.Errorf("a project models.json with an apiKey must prompt .gitignore:\n%s", out)
-	}
-	if stderr.Len() != 0 {
-		t.Errorf("stderr = %q, want no warnings for healthy files", stderr.String())
+	if !strings.Contains(out, "6CRS-s") || !strings.Contains(out, "***") {
+		t.Errorf("apiKey not masked as expected:\n%s", out)
 	}
 }
 
-func TestPrintProviderConfigSectionNoFiles(t *testing.T) {
+func TestProviderConfigSectionReportsNonUserLayers(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("ULTRAC_CONFIG_DIR", home)
+
+	// A project settings file declaring providers: ignored, and the reason
+	// must be printed. Silence here would look like "my provider vanished".
+	if err := os.MkdirAll(filepath.Join(cwd, ".ultrac"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cwd, ".ultrac", "settings.json"), `{
+      "providers": {
+        "leaky": { "baseUrl": "https://leaky.example.com/v1", "apiKey": "sk-project-secret" }
+      }
+    }`)
+
+	var stdout, stderr strings.Builder
+	printProviderConfigSection(&stdout, &stderr, cwd, settingsLayers(t, cwd))
+	out := stdout.String()
+
+	if !strings.Contains(out, "ignored (providers must live in the user layer):") {
+		t.Errorf("output does not report the ignored layer:\n%s", out)
+	}
+	if !strings.Contains(out, filepath.Join(cwd, ".ultrac", "settings.json")) {
+		t.Errorf("output does not name the offending file:\n%s", out)
+	}
+	if !strings.Contains(out, "leaky") {
+		t.Errorf("output does not name the ignored provider:\n%s", out)
+	}
+	// The project key is a secret and must not be printed, even while being
+	// reported as ignored.
+	if strings.Contains(out, "sk-project-secret") {
+		t.Errorf("the project layer's apiKey leaked into the report:\n%s", out)
+	}
+}
+
+func TestProviderConfigSectionEmpty(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
 	t.Setenv("ULTRAC_CONFIG_DIR", home)
 
 	var stdout, stderr strings.Builder
-	printProviderConfigSection(&stdout, &stderr, cwd)
+	printProviderConfigSection(&stdout, &stderr, cwd, settingsLayers(t, cwd))
 	out := stdout.String()
 
-	// ENOENT is the normal case: the paths are still shown (that is the
-	// point of the section — "where would I put the file"), marked not
-	// found, with no providers and no .gitignore noise.
+	// ENOENT is the normal case: the path is still shown (that is the point —
+	// "where would I put it"), marked not found, with no provider list and no
+	// legacy section.
 	for _, want := range []string{
-		filepath.Join(home, "models.json") + " (not found)",
-		filepath.Join(cwd, ".ultrac", "models.json") + " (not found)",
-		filepath.Join(home, "auth.json") + " (not found)",
+		"providers (settings.json):",
+		"settings.json (not found)",
 		"providers: (none declared)",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, ".gitignore") {
-		t.Errorf("no project-level secret files exist; .gitignore note is noise:\n%s", out)
+	if strings.Contains(out, "legacy provider files") {
+		t.Errorf("legacy section printed with no legacy files:\n%s", out)
 	}
 }
 
-// TestPrintProviderConfigSectionMasksOnlySecrets — a project models.json
-// with NO apiKey gets no .gitignore note (it is a config file like any
-// other), while the auth.json beside it still does.
-func TestPrintProviderConfigSectionMasksOnlySecrets(t *testing.T) {
+func TestProviderConfigSectionReportsIgnoredEnvKeys(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
 	t.Setenv("ULTRAC_CONFIG_DIR", home)
-	if err := os.MkdirAll(filepath.Join(cwd, ".ultrac"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeFile(t, filepath.Join(cwd, ".ultrac", "models.json"), `{
+
+	// ANTHROPIC_BASE_URL still exists but is a fallback now (D9). Saying so
+	// is what stops the next "why is my custom model hitting DeepSeek"
+	// debugging session.
+	writeFile(t, filepath.Join(home, "settings.json"), `{
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+        "ANTHROPIC_MODEL": "deepseek-flash",
+        "ANTHROPIC_AUTH_TOKEN": "sk-env-token"
+      },
       "providers": {
-        "plain": {
-          "baseUrl": "https://b.example.com/v1",
-          "api": "openai-completions",
-          "models": [
-            { "id": "n1", "cost": { "input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 1 } }
-          ]
-        }
+        "custom": { "baseUrl": "https://custom.example.com/v1", "apiKey": "k-custom-secret" }
       }
     }`)
-	writeFile(t, filepath.Join(cwd, ".ultrac", "auth.json"),
-		`{"plain": {"type": "api_key", "key": "sk-project-plain-key"}}`)
 
 	var stdout, stderr strings.Builder
-	printProviderConfigSection(&stdout, &stderr, cwd)
+	printProviderConfigSection(&stdout, &stderr, cwd, settingsLayers(t, cwd))
 	out := stdout.String()
 
-	if strings.Contains(out, `add ".ultrac/models.json" to .gitignore`) {
-		t.Errorf("a models.json without apiKey is not a secret file:\n%s", out)
+	if !strings.Contains(out, "ignored env keys") {
+		t.Errorf("the ignored env block is not reported:\n%s", out)
 	}
-	if !strings.Contains(out, `add ".ultrac/auth.json" to .gitignore`) {
-		t.Errorf("the project auth.json must prompt .gitignore:\n%s", out)
+	for _, want := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output does not list %s as ignored:\n%s", want, out)
+		}
 	}
-	if !strings.Contains(out, "plain: baseUrl=https://b.example.com/v1, models=1, credential=auth.json, key=sk-pro***") {
-		t.Errorf("plain summary wrong:\n%s", out)
+	// The custom provider is still declared and selectable — the env block
+	// being dead does not make the provider dead.
+	if !strings.Contains(out, "custom:") {
+		t.Errorf("the declared provider is missing:\n%s", out)
 	}
 }

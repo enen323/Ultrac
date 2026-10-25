@@ -1,117 +1,106 @@
 package main
 
-// model.go — resolving the settings env block, the merged models.json
-// catalog and the --model flag into the ai.Model the agent loop needs
-// (P5, P1), plus the per-provider credential chain that authenticates
-// the resolved model (P3).
+// model.go — resolving the --model flag and the merged provider catalog into
+// the ai.Model the agent loop needs, plus the per-provider credential lookup
+// that authenticates it.
 //
-// # Why this exists
+// # Where a model comes from
 //
-// The settings file speaks the Anthropic env-var dialect
-// (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL) — that is
-// what ~/.ultrac/settings.json has carried since T0, and the pi layer speaks
-// Model structs keyed by provider and api dialect. Something has to translate,
-// and it is this file. The translation rules below are the whole contract;
-// they are written out because "which endpoint did it pick" is the first
-// question whenever a run talks to the wrong server.
+// Exactly two places, and neither is the settings env block:
+//
+//	--model provider/id        the command line
+//	session seed               the model a resumed session last ran with
+//
+// A model that no settings `providers` entry (or legacy models.json entry)
+// describes is not a model: the catalog is the source of truth for what exists.
+// "I have no model" is a state the caller must surface, not something to guess
+// at — see errNoModelConfigured.
+//
+// # Why ANTHROPIC_* is gone (settings-unify-plan.md D11)
+//
+// ANTHROPIC_MODEL / ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN used to be a
+// second, parallel configuration system: a model id, an endpoint and one
+// credential shared by every provider. Two sources for the same fact meant the
+// env block could silently win over a provider's own entry, which is exactly
+// how one provider's key ended up at another vendor's endpoint ("Your api key
+// ... is invalid" while the key was perfectly good). There is now one source:
+// the provider entry. A settings file that still carries the ANTHROPIC_* keys
+// is read for nothing — they are ignored, and `ultrac config` says so.
 
 import (
+	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 
 	"ultrac/internal/ai"
-	"ultrac/internal/config"
-	"ultrac/internal/config/auth"
 	"ultrac/internal/models"
 )
 
-// resolveModel turns the flag and the settings env into a Model.
+// errNoModelConfigured is "nothing named a model" — distinct from a
+// configuration error.
+//
+// The distinction matters for the RPC mode: a client that can still show a
+// model picker treats this as a state (answer "no model", let the user pick),
+// while a broken provider definition is a hard failure. `errors.Is` on this
+// sentinel is how a caller tells them apart.
+var errNoModelConfigured = errors.New("no model configured")
+
+// resolveModel turns the flag into a Model.
 //
 // Precedence, in order:
 //
-//  1. id: the --model flag (bare or "provider/id") beats ANTHROPIC_MODEL.
-//  2. provider: the flag's "provider/" part, else the merged-catalog entry
-//     for the id, else the host of ANTHROPIC_BASE_URL, else "". With no
-//     signal at all, ai.WithDefaults infers the provider from the dialect
-//     — pi's models-store does the same, and for the anthropic default
-//     that means "anthropic", which is the honest label for a request
-//     aimed at an Anthropic-dialect endpoint we could not otherwise
-//     identify.
-//  3. api: the --api flag, else the ANTHROPIC_* convention, else the
-//     merged-catalog entry's own dialect. The three-way rule is §4.3 rule
-//     6 of the provider-config plan ("env 指定哪个 dialect 就用哪个")
-//     made precise: the anthropic default exists to interpret the
-//     settings block — ANTHROPIC_MODEL or ANTHROPIC_BASE_URL being set
-//     means that family is in play, and its dialect wins (the P5
-//     contract, byte for byte). With neither set nothing forces the
-//     dialect, so the entry's own api stands — a models.json declaration
-//     of "openai-completions" reaches the wire instead of being
-//     overwritten by the anthropic default and sent to the wrong
-//     endpoint. anthropic-messages remains the last resort for an id no
-//     entry describes; --api always wins over all of it.
-//  4. baseUrl: ANTHROPIC_BASE_URL beats the merged catalog's, which beats
-//     the provider default (ai.WithDefaults' fallback chain). "The merged
-//     catalog's" already encodes the models.json order: a provider-level
-//     baseUrl overrides the models[] entries of that provider, which
-//     override the built-in entry (merge.go rule 2).
+//  1. id: the --model flag ("provider/id", or a bare id the catalog knows).
+//     There is no env fallback — ANTHROPIC_MODEL is ignored (D11).
+//  2. provider: the flag's "provider/" part, else the catalog entry for the
+//     id. A bare id that nothing declares is an error: guessing a provider
+//     is how a request reaches an endpoint nobody chose.
+//  3. api: the --api flag, else the entry's own declared dialect. The
+//     ANTHROPIC_* convention that used to sit between them is gone (D11).
+//  4. baseUrl: the entry's own, else ai.WithDefaults' provider default. The
+//     merged catalog already encodes provider-level overrides (merge.go rule
+//     2), so this is the whole chain.
 //
-// A merged-catalog entry for (provider, id) is adopted wholesale for its
-// cost rates, context window and limits — but the resolved api dialect is
-// forced back onto it, because one provider can expose the same model
-// under two dialects at two URLs (DeepSeek's /anthropic vs
-// /chat/completions) and the settings block says which one is in play.
-//
-// The snapshot is the merged view (built-in catalog + both models.json
-// layers); a nil snapshot means "no models.json", which is exactly
-// models.Build() with no configs.
-func resolveModel(snap *models.Snapshot, flagModel, flagAPI string, env map[string]string) (ai.Model, error) {
+// A merged-catalog entry for (provider, id) is adopted wholesale for its cost
+// rates, context window and limits — but the resolved api dialect is forced
+// back onto it, because one provider can expose the same model under two
+// dialects at two URLs (DeepSeek's /anthropic vs /chat/completions). When the
+// chosen dialect differs from the entry's, its baseUrl is dropped: that URL
+// speaks the other protocol, and ai.WithDefaults fills in the one that
+// matches.
+func resolveModel(snap *models.Snapshot, flagModel, flagAPI string) (ai.Model, error) {
 	if snap == nil {
 		snap = models.Build()
 	}
 	providerName, id := splitModelFlag(flagModel)
 	if id == "" {
-		id = strings.TrimSpace(env[config.EnvModel])
-	}
-	if id == "" {
-		return ai.Model{}, fmt.Errorf("no model configured: set ANTHROPIC_MODEL in %s or pass --model",
-			config.ConfigHome())
+		return ai.Model{}, errNoModelConfigured
 	}
 
 	var provider ai.ProviderId
 	if providerName != "" {
 		provider = ai.ProviderId(providerName)
+	} else if entry, ok := catalogEntryByID(snap, id); ok {
+		provider = entry.Provider
 	}
 	if provider == "" {
-		if entry, ok := catalogEntryByID(snap, id); ok {
-			provider = entry.Provider
-		}
-	}
-	if provider == "" {
-		provider = providerFromBaseURL(env[config.EnvBaseURL])
-	}
-	// A provider whose models.json entry failed to compose must not
-	// resolve silently: the snapshot dropped its models, and the bare
-	// fallbacks below would produce a request that fails at the endpoint
-	// with a confusing error. pi fails at selection time too (the models
-	// store throws for a provider whose composition failed).
-	if provider != "" {
-		if err := snap.Problem(provider); err != nil {
-			return ai.Model{}, err
-		}
+		return ai.Model{}, fmt.Errorf(
+			"model %q: no provider declares it; use --model provider/id", id)
 	}
 
-	// The dialect decision, in precedence order (see the doc comment):
-	// an explicit --api flag, then the ANTHROPIC_* settings convention
-	// when that family is in play, then the entry's own api.
+	// A provider whose settings entry failed to compose must not resolve
+	// silently: the snapshot dropped its models, and the fallbacks below would
+	// produce a request that fails at the endpoint with a confusing error. pi
+	// fails at selection time too (the models store throws for a provider
+	// whose composition failed).
+	if err := snap.Problem(provider); err != nil {
+		return ai.Model{}, err
+	}
+
 	api := ai.APIAnthropicMessages
 	entry, hasEntry := snap.Lookup(provider, id)
 	switch {
 	case flagAPI != "":
 		api = ai.Api(flagAPI)
-	case settingsSpeakAnthropic(env):
-		// The settings block names the model or the endpoint: its
-		// dialect is the one in play (P5).
 	case hasEntry && entry.API != "":
 		api = entry.API
 	}
@@ -122,31 +111,17 @@ func resolveModel(snap *models.Snapshot, flagModel, flagAPI string, env map[stri
 		m.API = api
 		if entry.API != api {
 			// The entry describes the other dialect of the same model, and
-			// its base URL speaks that dialect. Drop it so WithDefaults
-			// picks the URL of the entry matching the resolved dialect
-			// (DeepSeek: /chat/completions vs /anthropic).
+			// its base URL speaks that dialect.
 			m.BaseURL = ""
 		}
-	}
-	if base := strings.TrimSpace(env[config.EnvBaseURL]); base != "" {
-		m.BaseURL = base
 	}
 	return ai.WithDefaults(m), nil
 }
 
-// settingsSpeakAnthropic reports whether the ANTHROPIC_* settings family is
-// in play for this resolution: it names the model, or it names the
-// endpoint. Either one means the settings block is choosing in the
-// Anthropic dialect by convention (the api precedence in resolveModel,
-// rule 2).
-func settingsSpeakAnthropic(env map[string]string) bool {
-	return strings.TrimSpace(env[config.EnvModel]) != "" ||
-		strings.TrimSpace(env[config.EnvBaseURL]) != ""
-}
-
 // splitModelFlag parses pi's "provider/id" model syntax. A bare id returns
-// ("", id); a flag with no id part returns ("provider", "") so the caller
-// falls back to the settings model id while keeping the provider hint.
+// ("", id) so the catalog can name the provider; a flag with no id part
+// returns ("provider", "") and the caller reports "no model configured"
+// rather than silently using a default.
 func splitModelFlag(flag string) (provider, id string) {
 	flag = strings.TrimSpace(flag)
 	if flag == "" {
@@ -164,10 +139,9 @@ func splitModelFlag(flag string) (provider, id string) {
 	return "", flag
 }
 
-// catalogEntryByID finds the first merged-catalog entry with this model
-// id, whatever its provider. It exists for the "user typed a model id,
-// nothing else" case: the entry names the provider and the dialect, which
-// is the best guess available.
+// catalogEntryByID finds the first merged-catalog entry with this model id,
+// whatever its provider. It exists for the "user typed a model id, nothing
+// else" case: the entry names the provider and the dialect.
 func catalogEntryByID(snap *models.Snapshot, id string) (ai.Model, bool) {
 	for _, m := range snap.Catalog() {
 		if m.ID == id {
@@ -177,90 +151,21 @@ func catalogEntryByID(snap *models.Snapshot, id string) (ai.Model, bool) {
 	return ai.Model{}, false
 }
 
-// hostProviders maps known API hosts to provider ids. The host is the only
-// provider signal a bare base URL carries.
-var hostProviders = map[string]ai.ProviderId{
-	"api.anthropic.com": ai.ProviderAnthropic,
-	"api.deepseek.com":  ai.ProviderDeepseek,
-	"api.moonshot.cn":   ai.ProviderMoonshotAICN,
-	"api.moonshot.ai":   ai.ProviderMoonshotAI,
-	"open.bigmodel.cn":  ai.ProviderZaiCodingCN,
-	"api.z.ai":          ai.ProviderZai,
-	"api.groq.com":      ai.ProviderGroq,
-	"api.x.ai":          ai.ProviderXAI,
-	"api.mistral.ai":    ai.ProviderMistral,
-	"api.minimax.chat":  ai.ProviderMinimax,
-	"api.openai.com":    ai.ProviderOpenAI,
-	"api.together.xyz":  ai.ProviderTogether,
-}
-
-// providerFromBaseURL infers the provider from a base URL's host. An unknown
-// host yields "" — the request still goes out, it just carries no catalog
-// rates. Guessing a provider from a host we do not know would attach another
-// provider's prices to the usage report.
-func providerFromBaseURL(base string) ai.ProviderId {
-	base = strings.TrimSpace(base)
-	if base == "" {
+// resolveCredential returns a provider's credential from the resolved
+// settings, or "" when it declares none.
+//
+// One step, no fallback (settings-unify-plan.md D11): the key lives in the
+// provider entry it belongs to, next to the baseUrl it is valid for. The old
+// env-block fallback meant a run could authenticate with a token that had
+// nothing to do with the endpoint it was talking to; a provider without a key
+// is now a configuration error with a name in it, not a silently borrowed
+// credential.
+func resolveCredential(snap *models.Snapshot, provider string) string {
+	if snap == nil {
 		return ""
 	}
-	u, err := url.Parse(base)
-	if err != nil || u.Host == "" {
-		return ""
-	}
-	host := strings.ToLower(u.Hostname())
-	if p, ok := hostProviders[host]; ok {
-		return p
-	}
-	// "api.<provider>.com" is the common shape for hosts not in the table;
-	// it only fires for hosts we can map to a real catalog provider id, so a
-	// proxy at proxy.internal.example.com yields "" rather than a fantasy.
-	if rest, ok := strings.CutPrefix(host, "api."); ok {
-		candidate := strings.TrimSuffix(rest, ".com")
-		candidate = strings.TrimSuffix(candidate, ".cn")
-		for _, p := range ai.Providers() {
-			if string(p) == candidate {
-				return p
-			}
-		}
+	if cfg, ok := snap.ProviderConfig(ai.ProviderId(provider)); ok {
+		return cfg.APIKey
 	}
 	return ""
-}
-
-// resolveCredential is the per-provider credential chain (plan §4.6):
-// models.json's apiKey first, auth.json's api_key entry second, nothing
-// third. It deliberately never reads env (D6) — the settings env block's
-// token rides OUTSIDE the chain as the harness's last-resort fallback
-// (settingsEnvToken), which is what keeps the pre-P3 path working
-// unchanged.
-//
-// Both inputs are the merged views the CLI built: the snapshot carries the
-// winning models.json entry per provider (project over user, D1), the
-// stack the merged auth.json layers. Either may be nil — "no such file"
-// is the normal case, not an error.
-func resolveCredential(snap *models.Snapshot, stack *auth.Stack, provider string) string {
-	if snap != nil {
-		if cfg, ok := snap.ProviderConfig(ai.ProviderId(provider)); ok && cfg.APIKey != "" {
-			return cfg.APIKey
-		}
-	}
-	if stack != nil {
-		return stack.APIKey(provider)
-	}
-	return ""
-}
-
-// settingsEnvToken is the settings env block's credential:
-// ANTHROPIC_AUTH_TOKEN wins over ANTHROPIC_API_KEY (the precedence the
-// Anthropic SDK documents and the old CLI used).
-//
-// It is NOT a step of the credential chain — the chain never reads env
-// (§4.6). This is the pre-P3 path, preserved verbatim as the harness's
-// last resort: a provider with no models.json apiKey and no auth.json
-// entry still authenticates the way it did before the chain existed (D6:
-// the settings env block's path to StreamOptions.APIKey is unaffected).
-func settingsEnvToken(env map[string]string) string {
-	if k := strings.TrimSpace(env[config.EnvAuthToken]); k != "" {
-		return k
-	}
-	return strings.TrimSpace(env[config.EnvAPIKey])
 }

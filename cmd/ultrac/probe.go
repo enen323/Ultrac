@@ -35,6 +35,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -42,6 +43,7 @@ import (
 	_ "ultrac/internal/ai/anthropic" // blank import: init() registration
 	_ "ultrac/internal/ai/openai"    // blank import: init() registration
 	"ultrac/internal/config"
+	"ultrac/internal/models"
 )
 
 // allEvents is the frozen 12-event protocol (contract C2). A run reports
@@ -145,16 +147,21 @@ func runProbe(args []string, stdout, stderr io.Writer) int {
 }
 
 func probeRun(f *probeFlags, stdout, stderr io.Writer) int {
-	settings := probeSettings()
-	apiKey := settings[config.EnvAuthToken]
+	cwd, _ := os.Getwd()
+	entry, provider, hasEntry := probeTarget(cwd)
+
+	// The probe is an endpoint diagnostic, not a request path: it takes the
+	// first provider that carries a key (DeepSeek first, since that is what
+	// the event matrix is calibrated against) and falls back to the settings
+	// env block only so a machine mid-migration can still probe. Requests
+	// never read env (settings-unify-plan.md D11).
+	apiKey := entry.APIKey
 	if apiKey == "" {
-		apiKey = settings[config.EnvAPIKey]
-	}
-	if apiKey == "" {
-		apiKey = os.Getenv("DEEPSEEK_API_KEY")
+		settings := probeSettings()
+		apiKey = firstNonEmpty(settings[config.EnvAuthToken], settings[config.EnvAPIKey], os.Getenv("DEEPSEEK_API_KEY"))
 	}
 	if apiKey == "" && !f.badKey {
-		fmt.Fprintln(stderr, "no credential: set DEEPSEEK_API_KEY or configure ~/.ultrac/settings.json")
+		fmt.Fprintln(stderr, "no credential: declare a provider with an apiKey in ~/.ultrac/settings.json")
 		return 2
 	}
 	if f.badKey {
@@ -175,21 +182,31 @@ func probeRun(f *probeFlags, stdout, stderr io.Writer) int {
 		opts.Reasoning = ai.ThinkingLevel(f.reasoning)
 	}
 
+	// Declared values first, then the probe's own defaults: an entry is what a
+	// run would use, and the probe's value is what the operator asked for.
+	entryModelID := ""
+	if len(entry.Models) > 0 {
+		entryModelID = entry.Models[0].ID
+	}
+	if !hasEntry {
+		provider = ai.ProviderDeepseek
+	}
+
 	switch f.mode {
 	case "openai":
 		model = ai.WithDefaults(ai.Model{
-			Provider: ai.ProviderDeepseek,
-			ID:       firstNonEmpty(f.modelID, "deepseek-chat"),
+			Provider: provider,
+			ID:       firstNonEmpty(f.modelID, entryModelID, "deepseek-chat"),
 		})
 		model.API = ai.APIOpenAICompletions
-		model.BaseURL = firstNonEmpty(f.baseURL, "https://api.deepseek.com")
+		model.BaseURL = firstNonEmpty(f.baseURL, entry.BaseURL, "https://api.deepseek.com")
 	default: // anthropic | tools
 		model = ai.WithDefaults(ai.Model{
-			Provider: ai.ProviderDeepseek,
+			Provider: provider,
 			API:      ai.APIAnthropicMessages,
-			ID:       firstNonEmpty(f.modelID, settings[config.EnvModel], "deepseek-chat"),
+			ID:       firstNonEmpty(f.modelID, entryModelID, "deepseek-chat"),
 		})
-		model.BaseURL = firstNonEmpty(f.baseURL, settings[config.EnvBaseURL], "https://api.deepseek.com/anthropic")
+		model.BaseURL = firstNonEmpty(f.baseURL, entry.BaseURL, "https://api.deepseek.com/anthropic")
 	}
 	opts.APIKey = apiKey
 
@@ -388,6 +405,30 @@ func truncate(s string, n int) string {
 // The probe bypasses the layer resolver on purpose: it is a raw endpoint
 // check, and the layers' project-scoped env would make "what does my user
 // config say" unanswerable from inside a project directory.
+// probeTarget picks the provider the probe talks to: DeepSeek when declared
+// (the event matrix is calibrated against its two endpoints), else the first
+// declared provider that carries a key.
+func probeTarget(cwd string) (models.ProviderConfig, ai.ProviderId, bool) {
+	r := config.NewFileResolver()
+	layers, _ := r.Layers(context.Background(), cwd)
+	merged, _ := config.MergeLayers(layers)
+	providers := merged.Providers
+	if p, ok := providers[string(ai.ProviderDeepseek)]; ok {
+		return p, ai.ProviderDeepseek, true
+	}
+	ids := make([]string, 0, len(providers))
+	for id := range providers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if providers[id].APIKey != "" {
+			return providers[id], ai.ProviderId(id), true
+		}
+	}
+	return models.ProviderConfig{}, "", false
+}
+
 func probeSettings() map[string]string {
 	raw, err := os.ReadFile(filepath.Join(config.ConfigHome(), "settings.json"))
 	if err != nil {
