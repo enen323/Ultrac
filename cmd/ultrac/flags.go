@@ -180,6 +180,7 @@ func usageText(w io.Writer, version, apis, tools string) {
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  config              show the resolved settings stack and effective env")
 	fmt.Fprintln(w, "  sessions [dir]      list transcripts for a directory (default: cwd)")
+	fmt.Fprintln(w, "  mcp import <path>   copy a .mcp.json's mcpServers into the user settings")
 	fmt.Fprintln(w, "  probe               stream one real request and print the event sequence")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Flags:")
