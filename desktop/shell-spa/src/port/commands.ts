@@ -7,9 +7,9 @@
 // The set is closed on purpose (plan D3): the page implements the 18-command
 // face of docs/desktop-shell-plan.md §4.2 plus the P-C4 branch quartet's
 // user-facing half (compact, fork, get_fork_messages — get_tree and clone
-// stay kernel-side: the tree navigator and the extraction have no page yet)
-// and add_custom_model (custom-model-plan.md: the custom-model dialog's one
-// command).
+// stay kernel-side: the tree navigator and the extraction have no page yet),
+// add_custom_model (custom-model-plan.md: the custom-model dialog's one
+// command) and get_mcp_status (mcp-plan.md D6: the MCP panel's one command).
 
 export const CmdPrompt = "prompt";
 export const CmdSteer = "steer";
@@ -35,3 +35,4 @@ export const CmdCompact = "compact";
 export const CmdFork = "fork";
 export const CmdGetForkMessages = "get_fork_messages";
 export const CmdAddCustomModel = "add_custom_model";
+export const CmdGetMCPStatus = "get_mcp_status";

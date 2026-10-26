@@ -17,6 +17,7 @@ import { CustomModelDialog } from "./CustomModelDialog.tsx";
 import { dismissBoot } from "./boot.ts";
 import { Composer } from "./Composer.tsx";
 import { ForkPicker } from "./ForkPicker.tsx";
+import { McpPanel } from "./McpPanel.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { Transcript } from "./Transcript.tsx";
@@ -38,6 +39,17 @@ export function App({ store, bridge }: { store: SessionStore; bridge: UltracBrid
 
   // The custom-model dialog: one form, one add_custom_model command.
   const [customOpen, setCustomOpen] = useState(false);
+
+  // The MCP panel. It pulls when it opens (mcp-plan.md D6's first hook);
+  // the second hook — a tool_execution_end whose tool name carries the
+  // mcp__ prefix — is the store's, so the panel is current even when it
+  // was opened before the first MCP tool ever ran.
+  const [mcpOpen, setMcpOpen] = useState(false);
+
+  const openMcpPanel = (): void => {
+    setMcpOpen(true);
+    void store.refreshMCPStatus();
+  };
 
   useEffect(() => {
     if (snap.ready) dismissBoot();
@@ -128,7 +140,17 @@ export function App({ store, bridge }: { store: SessionStore; bridge: UltracBrid
           >
             自定义
           </button>
+          <button
+            type="button"
+            className="head-action"
+            onClick={openMcpPanel}
+            title="查看已配置的 MCP 服务器（get_mcp_status）"
+          >
+            MCP
+          </button>
         </header>
+
+        {mcpOpen && <McpPanel servers={snap.mcpServers} onClose={() => setMcpOpen(false)} />}
 
         {customOpen && (
           <CustomModelDialog

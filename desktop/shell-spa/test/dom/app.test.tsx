@@ -16,7 +16,7 @@ import userEvent from "@testing-library/user-event";
 import { App } from "../../src/ui/App.tsx";
 import { SessionStore } from "../../src/state/session.ts";
 import type { CallResult, UltracBridge } from "../../src/port/bridge.ts";
-import type { CompactResult, CustomModelResult, ForkMessage, ForkResult, RpcEvent, RpcSessionState, WireMessage } from "../../src/state/wire.ts";
+import type { CompactResult, CustomModelResult, ForkMessage, ForkResult, McpServerStatus, RpcEvent, RpcSessionState, WireMessage } from "../../src/state/wire.ts";
 
 // The page under test drives the P-C4 dock entries too: the compaction
 // button, the fork picker, and the compacting flag on the water mark —
@@ -67,6 +67,9 @@ class StubKernel {
   // patches the picker from it), or the kernel's refusal.
   addAnswer: CustomModelResult | null = null;
   addError: string | null = null;
+
+  /** What get_mcp_status answers (mcp-plan.md P5). */
+  mcpAnswer: McpServerStatus[] = [];
 
   readonly bridge: UltracBridge = {
     shell: "electron",
@@ -148,6 +151,8 @@ class StubKernel {
         };
         return ok(null);
       }
+      case "get_mcp_status":
+        return ok({ servers: this.mcpAnswer });
       case "add_custom_model": {
         if (this.addError) return { ok: true, command: command.type, success: false, error: this.addError };
         // The kernel declares the model and reloads; if the saved model is
@@ -651,6 +656,125 @@ test("custom model: a kernel refusal lands in the dialog's error bar and keeps i
   // user can fix and retry.
   expect(await within(dialog).findByText("write auth.json: Access is denied")).toBeTruthy();
   expect(screen.queryByRole("dialog")).toBeTruthy();
+});
+
+// -- MCP (mcp-plan.md P5) -------------------------------------------------------
+
+test("MCP: the panel opens with a pull and lists every server", async () => {
+  const user = userEvent.setup();
+  kernel.mcpAnswer = [
+    { name: "codegraph", transport: "stdio", state: "ready", tools: 12 },
+    { name: "filesystem", transport: "stdio", state: "cached", tools: 14 },
+    { name: "broken", transport: "stdio", state: "failed", tools: 0, error: "命令不在 PATH 上" },
+  ];
+  render(<App store={store} bridge={kernel.bridge} />);
+  await kernel.load();
+  // The panel is lazy: nothing asks until it is opened (D6's first hook).
+  expect(kernel.called("get_mcp_status")).toBe(false);
+
+  await user.click(screen.getByRole("button", { name: "MCP" }));
+  const panel = await screen.findByRole("dialog", { name: "MCP 服务器" });
+  await waitFor(() => expect(kernel.called("get_mcp_status")).toBe(true));
+
+  // One row per server, and a row says what a user actually asks.
+  expect(within(panel).getByText("codegraph")).toBeTruthy();
+  expect(within(panel).getByText("已连接")).toBeTruthy();
+  // cached is not a promise: the label says the server was not contacted.
+  expect(within(panel).getByText("未连接")).toBeTruthy();
+  expect(within(panel).getByText("不可用")).toBeTruthy();
+  expect(within(panel).getByText("12 个工具")).toBeTruthy();
+
+  // The failure's reason is in the row, next to the state that needs it.
+  await user.click(within(panel).getByText("broken"));
+  expect(within(panel).getByText("命令不在 PATH 上")).toBeTruthy();
+  expect(within(panel).getByText("连接失败，本次运行用不了它")).toBeTruthy();
+
+  await user.click(within(panel).getByText("关闭"));
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+test("MCP: a tool call with the mcp__ prefix refreshes the open panel", async () => {
+  const user = userEvent.setup();
+  // A cached server: the boot read its tools off disk and spawned nothing.
+  kernel.mcpAnswer = [{ name: "filesystem", transport: "stdio", state: "cached", tools: 14 }];
+  render(<App store={store} bridge={kernel.bridge} />);
+  await kernel.load();
+
+  await user.click(screen.getByRole("button", { name: "MCP" }));
+  const panel = await screen.findByRole("dialog", { name: "MCP 服务器" });
+  await waitFor(() => expect(within(panel).getByText("未连接")).toBeTruthy());
+
+  // The model calls one of its tools. The kernel answers the status with the
+  // server now up, and the store's hook is what makes the panel show it.
+  kernel.mcpAnswer = [{ name: "filesystem", transport: "stdio", state: "ready", tools: 14 }];
+  await kernel.emit({
+    type: "tool_execution_end",
+    toolCallId: "c1",
+    toolName: "mcp__filesystem__read_file",
+    result: { content: [{ type: "text", text: "package main" }] },
+    isError: false,
+    durationMs: 30,
+  });
+
+  await waitFor(() => expect(within(panel).getByText("已连接")).toBeTruthy());
+});
+
+test("MCP: a built-in tool call does not refresh it", async () => {
+  const user = userEvent.setup();
+  kernel.mcpAnswer = [{ name: "filesystem", transport: "stdio", state: "cached", tools: 14 }];
+  render(<App store={store} bridge={kernel.bridge} />);
+  await kernel.load();
+
+  await user.click(screen.getByRole("button", { name: "MCP" }));
+  await screen.findByRole("dialog", { name: "MCP 服务器" });
+  await waitFor(() => expect(kernel.called("get_mcp_status")).toBe(true));
+  const before = kernel.callOf("get_mcp_status").length;
+
+  await kernel.emit({
+    type: "tool_execution_end",
+    toolCallId: "c1",
+    toolName: "read",
+    result: { content: [{ type: "text", text: "package main" }] },
+    isError: false,
+    durationMs: 5,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  // One pull on open, and no more: a request per tool result would be a
+  // request per read.
+  expect(kernel.callOf("get_mcp_status").length).toBe(before);
+});
+
+test("MCP: with no servers configured the panel says so instead of erroring", async () => {
+  const user = userEvent.setup();
+  kernel.mcpAnswer = [];
+  render(<App store={store} bridge={kernel.bridge} />);
+  await kernel.load();
+
+  await user.click(screen.getByRole("button", { name: "MCP" }));
+  const panel = await screen.findByRole("dialog", { name: "MCP 服务器" });
+
+  // Most machines have none, so this is the case a user sees first — and it
+  // names the two ways to get one.
+  expect(within(panel).getByText(/没有配置 MCP 服务器/)).toBeTruthy();
+  expect(within(panel).getByText("mcpServers")).toBeTruthy();
+  expect(within(panel).getByText("ultrac mcp import <path>")).toBeTruthy();
+});
+
+test("MCP: the panel has no switch — membership is decided at boot", async () => {
+  const user = userEvent.setup();
+  kernel.mcpAnswer = [{ name: "fs", transport: "stdio", state: "cached", tools: 3 }];
+  render(<App store={store} bridge={kernel.bridge} />);
+  await kernel.load();
+
+  await user.click(screen.getByRole("button", { name: "MCP" }));
+  const panel = await screen.findByRole("dialog", { name: "MCP 服务器" });
+
+  // A toggle here could only lie: the kernel's tool set is fixed for the
+  // process (§3.1), so turning a server "on" would change nothing until a
+  // restart.
+  expect(within(panel).queryByRole("switch")).toBeNull();
+  expect(within(panel).queryByRole("checkbox")).toBeNull();
 });
 
 test("custom model: an existing provider id gets the overwrite warning", async () => {

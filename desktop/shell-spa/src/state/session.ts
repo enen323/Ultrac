@@ -36,6 +36,7 @@ import {
   CmdGetAvailableModels,
   CmdGetAvailableThinking,
   CmdGetForkMessages,
+  CmdGetMCPStatus,
   CmdGetMessages,
   CmdGetState,
   CmdListSessions,
@@ -59,6 +60,8 @@ import type {
   CustomModelSpec,
   ForkMessage,
   ForkResult,
+  McpServerStatus,
+  McpStatusResult,
   RpcEvent,
   RpcModel,
   RpcSessionState,
@@ -84,6 +87,8 @@ export interface SessionSnapshot {
   models: RpcModel[];
   thinkingLevels: string[];
   sessions: SessionSummary[];
+  /** get_mcp_status's inventory (mcp-plan.md D6). Empty means none. */
+  mcpServers: McpServerStatus[];
 }
 
 export class SessionStore {
@@ -98,6 +103,7 @@ export class SessionStore {
     models: [],
     thinkingLevels: [],
     sessions: [],
+    mcpServers: [],
   };
   /** Events seen before the snapshot (and while it was in flight). */
   #queue: RpcEvent[] = [];
@@ -152,6 +158,7 @@ export class SessionStore {
       if (streaming) this.#startPoll();
       else this.#stopPoll();
     }
+    if (isMcpToolEnd(event)) void this.refreshMCPStatus();
   }
 
   async #onSessionLoaded(state: RpcSessionState): Promise<void> {
@@ -351,6 +358,34 @@ export class SessionStore {
     });
   }
 
+  /**
+   * Read the MCP inventory (mcp-plan.md D6).
+   *
+   * This is the whole "keep the panel current" strategy, and it is a pull
+   * rather than a push for a concrete reason: the boot strategy collapses
+   * the window in which a server's state can change. A boot with a cache
+   * leaves a server `cached` and nothing touches it until a tool is called;
+   * a boot without one blocks until the server is `ready` or `failed`. So
+   * the only moment the state can move spur is the first call to one of its
+   * tools — and that is the moment #ingest pulls (see isMcpToolEnd).
+   *
+   * The panel pulls once when it opens, for the same reason there is no
+   * timer: an open panel that never sees a tool call has nothing new to
+   * show.
+   *
+   * A failed read is silent. The panel renders whatever it last had — an
+   * empty list renders as "no MCP servers", which is true on most machines
+   * and is not worth an error banner.
+   */
+  async refreshMCPStatus(): Promise<void> {
+    try {
+      const data = await callData<McpStatusResult>(this.#bridge, { type: CmdGetMCPStatus });
+      this.#patch({ mcpServers: data.servers ?? [] });
+    } catch {
+      // The next open, or the next MCP tool call, tries again.
+    }
+  }
+
   async refreshSessions(): Promise<void> {
     try {
       const data = await callData<{ sessions: SessionSummary[] }>(this.#bridge, { type: CmdListSessions });
@@ -443,6 +478,22 @@ export class SessionStore {
     this.#snapshot = { ...this.#snapshot, ...partial };
     for (const listener of this.#listeners) listener();
   }
+}
+
+/**
+ * Whether an event is the end of an MCP tool call — the one moment a
+ * server's state can have moved (mcp-plan.md §3.7).
+ *
+ * The name test is the `mcp__` prefix, which is the pool's naming and the
+ * ecosystem's: a tool whose name starts with it came from a server. The
+ * server name itself is never parsed out — the panel does not need it, and
+ * a name with a sanitised-hash suffix is not something to take apart in a
+ * string comparison.
+ */
+function isMcpToolEnd(event: RpcEvent): boolean {
+  if (event.type !== "tool_execution_end") return false;
+  const name = event.toolName;
+  return typeof name === "string" && name.startsWith("mcp__");
 }
 
 /** The streaming flag the event stream implies (hostclient.ts's rule). */

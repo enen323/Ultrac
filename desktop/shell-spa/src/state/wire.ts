@@ -222,6 +222,40 @@ export interface CustomModelResult {
 }
 
 // ---------------------------------------------------------------------------
+// MCP (get_mcp_status — docs/开发计划/新功能计划/mcp-plan.md D6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Where one MCP server is. The four values are the pool's vocabulary, and
+ * they answer four different questions a user actually asks:
+ *
+ *   cached    configured, tools registered from the cache, not contacted yet
+ *   spawning  a tool asked for it and the handshake is running
+ *   ready     the handshake completed in this process
+ *   failed    the last attempt to reach it did not work
+ */
+export type McpState = "cached" | "spawning" | "ready" | "failed";
+
+/** McpServerStatus — internal/mcp/host.go's ServerStatus. */
+export interface McpServerStatus {
+  name: string;
+  transport: string;
+  state: McpState;
+  tools: number;
+  /** Present only when the server is not usable. */
+  error?: string;
+  /** What the server says it is for — kept for a server never contacted. */
+  instructions?: string;
+  /** Non-zero means the server is logging to stdout (R6). Absent when 0. */
+  malformedLines?: number;
+}
+
+/** MCPStatusResult — the response wraps the list so it can grow. */
+export interface McpStatusResult {
+  servers: McpServerStatus[];
+}
+
+// ---------------------------------------------------------------------------
 // Messages and content blocks (ai.Message / ai.ContentBlock)
 // ---------------------------------------------------------------------------
 

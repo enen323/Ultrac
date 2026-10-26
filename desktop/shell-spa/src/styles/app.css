@@ -799,6 +799,208 @@ textarea {
   cursor: default;
 }
 
+/* ---------------------------------------------------------------------------
+   MCP panel (mcp-plan.md P5): the inventory, not a settings form.
+
+   Same dialog treatment as the custom-model form — dimmed page, centered
+   panel, Escape or a backdrop click to dismiss — but the rows are read-only
+   and that is the design, not an omission: membership is fixed when the
+   kernel builds its tool set, so a switch here could only show a state no
+   restart has agreed to (plan §3.1).
+
+   State is carried by a chip and a row tint rather than a status dot: a dot
+   asks to be read as "up / down", and `cached` is neither — the server was
+   never contacted in this process.
+   --------------------------------------------------------------------------- */
+
+.mcp-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgb(23 30 45 / .38);
+}
+
+.mcp-panel {
+  width: min(560px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+  padding: 14px 18px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-float);
+}
+
+.mcp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: var(--fs-title);
+  font-weight: var(--w-semi);
+}
+
+.mcp-close {
+  flex: none;
+  color: var(--faint);
+  font-size: var(--fs-micro);
+}
+
+.mcp-close:hover {
+  color: var(--text);
+}
+
+/* The one sentence the panel exists to pre-empt: why nothing here can be
+   switched, and why a change needs a restart. */
+.mcp-note {
+  margin: 8px 0 10px;
+  color: var(--faint);
+  font-size: var(--fs-micro);
+  line-height: 1.6;
+}
+
+.mcp-empty {
+  margin: 6px 0 2px;
+  color: var(--muted);
+  font-size: var(--fs-meta);
+  line-height: 1.9;
+}
+
+.mcp-empty code {
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  padding: 1px 5px;
+  border-radius: var(--r-xs);
+  background: var(--code-face);
+}
+
+.mcp-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mcp-row {
+  border: 1px solid var(--hair);
+  border-radius: var(--r-md);
+  background: var(--raised);
+  overflow: hidden;
+}
+
+/* A failing server is tinted at the edge rather than across the row: the
+   row's background is what the hover transition paints, and a wash under it
+   would make the hover invisible on exactly the row a user is inspecting. */
+.mcp-row.is-failed {
+  border-color: var(--err);
+}
+
+.mcp-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto 12px;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 11px;
+  background: none;
+  color: var(--text);
+  font-size: var(--fs-ui);
+  text-align: left;
+  transition: background var(--m-line);
+}
+
+.mcp-summary:hover {
+  background: var(--overlay);
+}
+
+.mcp-name {
+  font-family: var(--mono);
+  font-size: var(--fs-meta);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-transport {
+  color: var(--faint);
+  font-size: var(--fs-micro);
+}
+
+.mcp-state {
+  padding: 1px 9px;
+  border-radius: var(--r-pill);
+  background: var(--overlay);
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  white-space: nowrap;
+}
+
+.mcp-row.is-ready .mcp-state {
+  background: var(--ok-wash);
+  color: var(--ok);
+}
+
+.mcp-row.is-failed .mcp-state {
+  background: var(--err-wash);
+  color: var(--err);
+}
+
+.mcp-tools {
+  color: var(--faint);
+  font-size: var(--fs-micro);
+  white-space: nowrap;
+}
+
+.mcp-chevron {
+  color: var(--faint);
+  font-size: var(--fs-micro);
+  text-align: center;
+}
+
+.mcp-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 11px 10px;
+  border-top: 1px solid var(--hair);
+}
+
+.mcp-hint {
+  margin: 0;
+  color: var(--faint);
+  font-size: var(--fs-micro);
+  line-height: 1.6;
+}
+
+/* What the server says it is for. Pre-wrapped: an `instructions` string is
+   prose the server wrote, and its line breaks are part of it. */
+.mcp-instructions {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-meta);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.mcp-error {
+  margin: 0;
+  padding: 6px 9px;
+  border-radius: var(--r-sm);
+  background: var(--err-wash);
+  color: var(--err);
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  line-height: 1.6;
+  word-break: break-word;
+}
+
 .composer-box {
   display: flex;
   align-items: flex-end;
