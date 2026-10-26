@@ -46,6 +46,7 @@ import (
 	"ultrac/internal/compact"
 	"ultrac/internal/config"
 	"ultrac/internal/logging"
+	"ultrac/internal/mcp"
 	"ultrac/internal/models"
 	"ultrac/internal/prompt"
 	"ultrac/internal/rpc"
@@ -93,6 +94,11 @@ type harness struct {
 	// nowhere to go and are dropped, exactly as pi drops them in a mode
 	// with no event stream.
 	emitEvent func(agent.AgentEvent) error
+
+	// mcp is the MCP connection pool. It owns every configured server's
+	// subprocess and is closed when the process exits; nil when no server
+	// is configured, which is the common case and costs nothing.
+	mcp *mcp.Host
 
 	// streamFn overrides the provider registry. Nil in production; tests
 	// inject a fake so no request leaves the process.
@@ -203,7 +209,19 @@ func buildHarness(f *agentFlags, cwd string, stderr io.Writer, streamFn agent.St
 	}
 
 	// -- 4. Tools ------------------------------------------------------------
+	//
+	// The built-in coding tools, then whatever the MCP servers contribute.
+	// The order matters only in that it is fixed: the tool list is part of
+	// the provider's prompt prefix, and a stable order is what keeps that
+	// prefix cacheable.
+	//
+	// MCP is assembled here and not later because the agent's tool set is
+	// built once and cannot be replaced (see the internal/mcp package doc) —
+	// a server that has to be asked about its tools is asked right now, and
+	// a server that cannot be reached contributes nothing.
 	tools := tool.All(cwd)
+	mcpHost, mcpTools := mcp.NewHost(merged, stderr)
+	tools = append(tools, mcpTools...)
 
 	h := &harness{
 		flags:      f,
@@ -212,6 +230,7 @@ func buildHarness(f *agentFlags, cwd string, stderr io.Writer, streamFn agent.St
 		seed:       seed,
 		model:      model,
 		tools:      tools,
+		mcp:        mcpHost,
 		resolver:   r,
 		compaction: compaction,
 		streamFn:   streamFn,
@@ -227,6 +246,20 @@ func buildHarness(f *agentFlags, cwd string, stderr io.Writer, streamFn agent.St
 		return nil, 1
 	}
 	return h, 0
+}
+
+// Close releases what the harness owns that outlives a session: every MCP
+// subprocess.
+//
+// It is explicit rather than a finalizer because a subprocess is an OS
+// resource with a lifetime of its own, and the two modes end differently
+// (print returns from one function, RPC returns from its serve loop). A
+// server that ignores stdin EOF gets killed, inside a budget, by the
+// transport — so this never blocks an exit for long.
+func (h *harness) Close() {
+	if h.mcp != nil {
+		h.mcp.Close()
+	}
 }
 
 // noModelGuidance is the CLI's "you never said which model" exit. It replaces

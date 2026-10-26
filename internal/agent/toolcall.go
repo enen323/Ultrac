@@ -210,20 +210,56 @@ func compileSchema(doc json.RawMessage) (*jsonschema.Schema, error) {
 // ValidateArguments checks raw arguments against a JSON Schema document. It
 // is exported for callers that validate outside the tool-call path (tests,
 // the probe command).
+//
+// It recompiles on every call, which is right for a one-off check and wrong
+// for a hot path: a tool whose schema is only known at runtime (internal/mcp's
+// remote tools) must use CompileSchema once and hold the result.
 func ValidateArguments(schema json.RawMessage, args map[string]any) error {
 	compiled, err := compileSchema(schema)
 	if err != nil {
 		return err
 	}
-	encoded, err := json.Marshal(args)
+	return compiled.Validate(args)
+}
+
+// CompiledSchema is a JSON Schema compiled once and validated against many
+// times.
+//
+// It exists because a tool's parameters are not always a compile-time
+// constant. An MCP tool's schema arrives over the wire, and compiling it per
+// call — the only thing ValidateArguments offers — would put a compiler in
+// the path of every tool call.
+type CompiledSchema struct {
+	schema *jsonschema.Schema
+}
+
+// CompileSchema compiles a JSON Schema document.
+//
+// A document that does not compile is an error, not a panic. That is the
+// contract every caller in this package keeps: a broken tool's schema must
+// cost the tool its calls, not the process its life.
+func CompileSchema(doc json.RawMessage) (*CompiledSchema, error) {
+	schema, err := compileSchema(doc)
+	if err != nil {
+		return nil, err
+	}
+	return &CompiledSchema{schema: schema}, nil
+}
+
+// Validate checks a value against the compiled schema. The value is encoded
+// to JSON first because the validator works on decoded JSON, not on Go maps —
+// a map[string]any holding a float64 and a JSON number are two different
+// things to a schema that says "integer".
+func (c *CompiledSchema) Validate(value any) error {
+	encoded, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-	value, err := jsonschema.UnmarshalJSON(bytes.NewReader(encoded))
+	decoded, err := jsonschema.UnmarshalJSON(bytes.NewReader(encoded))
 	if err != nil {
 		return err
 	}
-	return compiled.Validate(value)
+	return c.schema.Validate(decoded)
 }
 
 // Registry is the set of tools available for one run, assembled from

@@ -36,6 +36,7 @@ import (
 	"ultrac/internal/agent"
 	"ultrac/internal/ai"
 	"ultrac/internal/config"
+	"ultrac/internal/mcp"
 	"ultrac/internal/models"
 	"ultrac/internal/rpc"
 	"ultrac/internal/session"
@@ -324,6 +325,22 @@ func (host *rpcHost) SetAutoCompaction(enabled bool) error {
 func (host *rpcHost) IsCompacting() bool { return host.h.compactor.IsCompacting() }
 
 func (host *rpcHost) AutoCompactionEnabled() bool { return host.h.compactor.AutoEnabled() }
+
+// MCPStatus lists the configured MCP servers and where each one is
+// (mcp-plan.md D6).
+//
+// It is a read of the pool's own state, nothing more: there is no reload and
+// no reconciliation, because a server's membership is fixed at boot (the
+// agent's tool set cannot change afterwards, §3.1). A client asking twice
+// gets the same servers; what can differ between two reads is a server's
+// state, which moves from cached to ready the first time one of its tools is
+// called — and that is exactly the moment the client is told to pull again.
+func (host *rpcHost) MCPStatus() []mcp.ServerStatus {
+	if host.h.mcp == nil {
+		return nil
+	}
+	return host.h.mcp.Status()
+}
 
 // AddCustomModel writes a user-declared provider end to end and answers
 // with the fresh catalog (custom-model-plan.md D3: one command, one user
@@ -634,6 +651,11 @@ func runRPC(f *agentFlags, stdin io.Reader, stdout, stderr io.Writer) int {
 	host := newRPCHost(h, ctx)
 	server := rpc.NewServer(host, writer)
 	defer server.Close()
+	// The MCP subprocesses are a lease on this process: the kernel's stdin
+	// is the parent's, and when it closes the servers go too (mcp-plan.md
+	// §3.6). This is the other end of that — an orderly exit drains them
+	// without waiting on a wedged one.
+	defer h.Close()
 
 	serveErr := server.Serve(ctx, stdin)
 	if serveErr != nil && errors.Is(serveErr, context.Canceled) {

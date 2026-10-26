@@ -58,6 +58,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return runConfig(args[1:], stdout, stderr)
 		case "sessions":
 			return runSessions(args[1:], stdout, stderr)
+		case "mcp":
+			return runMCP(args[1:], stdout, stderr)
 		case "probe":
 			return runProbe(args[1:], stdout, stderr)
 		case "help":
@@ -180,8 +182,15 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 			sort.Strings(ids)
 			fmt.Fprintf(stdout, "    (providers section: %s)\n", strings.Join(ids, ", "))
 		}
+		if len(l.Settings.MCPServers) > 0 {
+			// Server names, for the same reason: the spawn line is printed
+			// in the MCP section below, per server, where there is room.
+			fmt.Fprintf(stdout, "    (mcpServers section: %s)\n",
+				strings.Join(config.MCPServerNames(l.Settings.MCPServers), ", "))
+		}
 		if len(l.Settings.Env) == 0 && len(l.Settings.Extra) == 0 &&
-			l.Settings.Compaction == nil && len(l.Settings.Providers) == 0 {
+			l.Settings.Compaction == nil && len(l.Settings.Providers) == 0 &&
+			len(l.Settings.MCPServers) == 0 {
 			fmt.Fprintln(stdout, "    (empty)")
 		}
 	}
@@ -218,6 +227,12 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 	// declare, and where each one's credential comes from — the question
 	// "why did my key not work" is answered here or nowhere.
 	printProviderConfigSection(stdout, stderr, cwd, layers)
+
+	// The MCP section: every declared server and, for one that cannot be
+	// used, the reason — the question "why does my server not appear" is
+	// answered here or nowhere.
+	fmt.Fprintln(stdout)
+	printMCPConfigSection(stdout, layers)
 
 	if loadErr != nil {
 		fmt.Fprintf(stderr, "\nwarning: %v\n", loadErr)

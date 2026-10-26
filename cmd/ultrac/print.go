@@ -116,6 +116,10 @@ func (ps *printSession) run() int {
 	if code != 0 {
 		return code
 	}
+	// The MCP subprocesses are drained on the way out, whichever way this
+	// returns. A print run is one prompt, but the servers a tool call spawned
+	// do not know that.
+	defer h.Close()
 	mgr := h.mgr
 	if !f.Continue {
 		// A resumed session already carries the model and thinking level
