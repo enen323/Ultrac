@@ -1,7 +1,8 @@
 package main
 
-// configfiles.go — the provider section of `ultrac config`
-// (settings-unify-plan.md, superseding provider-config-plan.md P4).
+// configfiles.go — the provider and MCP sections of `ultrac config`
+// (settings-unify-plan.md, superseding provider-config-plan.md P4;
+// docs/开发计划/新功能计划/mcp-plan.md P1).
 //
 // # What it answers
 //
@@ -12,19 +13,24 @@ package main
 // model count and where the credential comes from, the key masked, and the
 // layer-ownership violations that made a provider invisible.
 //
-// It also reports the legacy models.json / auth.json files while they still
-// exist, because their presence means the run is on the fallback path and the
-// fix is one command.
+// The MCP section answers the twin question — "why does my server not
+// appear" — with the same shape: every declared server, the layers that
+// declare it, the spawn line, and the reason one of them cannot be used.
+// That reason lives here and nowhere else, because a server that fails
+// validation never reaches the engine.
 
 import (
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 
 	"ultrac/internal/ai"
 	"ultrac/internal/config"
+	"ultrac/internal/mcp"
 	"ultrac/internal/models"
 )
 
@@ -86,6 +92,105 @@ func printProviderConfigSection(stdout, stderr io.Writer, cwd string, layers []c
 		}
 	}
 
+}
+
+// printMCPConfigSection renders the MCP inventory: every server the layers
+// resolve to, the layers that declared it, the spawn line, and — for one that
+// cannot be used — the reason.
+//
+// It reads the merged view the rest of the command already reported, so this
+// section cannot disagree with the stack above it. Env values are never shown:
+// an MCP entry's env block is where an API token usually lives, and the key
+// names are all a user needs to see that the variable is set (I6).
+func printMCPConfigSection(stdout io.Writer, layers []config.Layer) {
+	merged, _ := config.MergeLayers(layers)
+	servers := merged.MCPServers
+	names := config.MCPServerNames(servers)
+
+	fmt.Fprintln(stdout, "mcp servers (settings.json):")
+	if len(names) == 0 {
+		fmt.Fprintln(stdout, "  (none declared)")
+		return
+	}
+
+	for _, name := range names {
+		entry := servers[name]
+		where := mcpSourcesFor(layers, name)
+		switch {
+		case entry.Broken():
+			// Still an entry, and the one the user is most likely to be
+			// fixing. Say what happened to it rather than hiding it.
+			fmt.Fprintf(stdout, "  %s [%s]: (entry does not parse; kept verbatim)\n", name, where)
+			continue
+		default:
+			if _, err := mcp.FromConfig(name, entry); err != nil {
+				fmt.Fprintf(stdout, "  %s [%s]: unusable: %v\n", name, where, err)
+				continue
+			}
+		}
+
+		fmt.Fprintf(stdout, "  %s [%s]: %s\n", name, where, mcpCommandLine(entry))
+		if detail := mcpEntryDetails(entry); detail != "" {
+			fmt.Fprintf(stdout, "      %s\n", detail)
+		}
+	}
+}
+
+// mcpSourcesFor names the layers declaring a server, in stack order. Unlike
+// providers this is never a violation — a project file is allowed to declare
+// servers (mcp-plan.md D1) — so the question it answers is "where did this
+// one come from", not "why was it ignored".
+func mcpSourcesFor(layers []config.Layer, name string) string {
+	var out []string
+	for _, l := range layers {
+		if _, ok := l.Settings.MCPServers[name]; ok {
+			out = append(out, config.DisplayName(l.Source))
+		}
+	}
+	if len(out) == 0 {
+		return "merged"
+	}
+	return joinWithComma(out)
+}
+
+// mcpCommandLine renders the spawn line: the command plus its arguments.
+func mcpCommandLine(c config.MCPServerConfig) string {
+	line := c.Command
+	for _, a := range c.Args {
+		line += " " + a
+	}
+	return line
+}
+
+// mcpEntryDetails renders the fields that are not part of the spawn line.
+// Anything the file did not state stays out, so the output never implies a
+// default the user never wrote.
+func mcpEntryDetails(c config.MCPServerConfig) string {
+	var parts []string
+	if c.StartupTimeoutSeconds > 0 {
+		parts = append(parts, "startup="+strconv.Itoa(c.StartupTimeoutSeconds)+"s")
+	}
+	if c.CallTimeoutSeconds > 0 {
+		parts = append(parts, "call="+strconv.Itoa(c.CallTimeoutSeconds)+"s")
+	}
+	if c.AutoStart {
+		parts = append(parts, "autoStart")
+	}
+	if len(c.DisabledTools) > 0 {
+		parts = append(parts, "disabled="+joinWithComma(slices.Sorted(slices.Values(c.DisabledTools))))
+	}
+	if len(c.Env) > 0 {
+		keys := make([]string, 0, len(c.Env))
+		for k := range c.Env {
+			keys = append(keys, k+"=<set>")
+		}
+		sort.Strings(keys)
+		parts = append(parts, "env="+joinWithComma(keys))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return joinWithComma(parts)
 }
 
 // joinWithComma renders a provider id list for a diagnostic line.

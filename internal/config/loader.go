@@ -273,7 +273,8 @@ func isMissingDir(err error) bool {
 }
 
 func isEmpty(s Settings) bool {
-	return len(s.Env) == 0 && len(s.Extra) == 0 && s.Compaction == nil && len(s.Providers) == 0
+	return len(s.Env) == 0 && len(s.Extra) == 0 && s.Compaction == nil &&
+		len(s.Providers) == 0 && len(s.MCPServers) == 0
 }
 
 // MergeSettings deep-merges over into base, later winning.
@@ -293,11 +294,19 @@ func isEmpty(s Settings) bool {
 // (settings-unify-plan.md D2). Use MergeLayers rather than calling this
 // directly: it enforces the layer-ownership rule that providers only count
 // from the user layer (D4).
+//
+// MCPServers merge the same way, per server name, because a project entry
+// naming only a command must not inherit the user layer's env — and unlike
+// providers every layer is allowed to declare them (mcp-plan.md D1: a server
+// definition is not a credential). disabledTools is the one union
+// (internal/config/mcp.go explains why a project file must not be able to
+// lift a user's restriction).
 func MergeSettings(base, over Settings) Settings {
 	out := Settings{
 		Env:        mergeStringMaps(base.Env, over.Env),
 		Compaction: mergeCompaction(base.Compaction, over.Compaction),
 		Providers:  mergeProviders(base.Providers, over.Providers),
+		MCPServers: mergeMCPServers(base.MCPServers, over.MCPServers),
 	}
 
 	keys := make(map[string]struct{}, len(base.Extra)+len(over.Extra))
@@ -379,6 +388,11 @@ type ProviderLayerProblem struct {
 //
 // Callers that need the resolved stack must go through this function rather
 // than folding with MergeSettings themselves, or the rule does not apply.
+//
+// mcpServers passes through untouched, from every layer: the rule above is
+// about credentials, and a server definition is the opposite of one. A
+// project settings file saying "this repository uses this MCP server" is
+// information the repository is supposed to carry (mcp-plan.md D1).
 func MergeLayers(layers []Layer) (Settings, []ProviderLayerProblem) {
 	var merged Settings
 	var problems []ProviderLayerProblem

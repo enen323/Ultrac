@@ -51,7 +51,8 @@ func (s Source) String() string {
 
 // Settings is the shape of a settings file.
 //
-// Only Env, Compaction and Providers are typed. That is not laziness about
+// Only Env, Compaction, Providers and MCPServers are typed. That is not
+// laziness about
 // scope — it is a statement about who owns the file. ~/.ultrac/settings.json is
 // read by the TypeScript implementation too, and a struct with forty typed
 // fields would silently drop the thirty-eight this version has never heard of on
@@ -81,6 +82,22 @@ type Settings struct {
 	// committed to git and a credential in it is an unrecoverable leak
 	// (plan D4).
 	Providers map[string]models.ProviderConfig `json:"providers,omitempty"`
+
+	// MCPServers is the typed MCP section: every declared server's spawn
+	// command, arguments, environment and tool exclusions
+	// (docs/开发计划/新功能计划/mcp-plan.md).
+	//
+	// Unlike Providers this section IS honoured from every layer, and the
+	// split is the point: a provider carries an API key and a project
+	// settings file is committed to git, while "this repository uses this
+	// MCP server" is project information that belongs in the repository
+	// (plan D1). What both sections share is the merge shape and the
+	// park-on-failure rule.
+	//
+	// An entry that does not decode into MCPServerConfig is carried inside
+	// the map, verbatim, rather than failing the section: one typo must not
+	// take every other server down with it.
+	MCPServers map[string]MCPServerConfig `json:"mcpServers,omitempty"`
 
 	// Extra holds every other top-level key, preserved byte-for-byte as JSON.
 	// Marshalling merges Extra and Env into one object; see MarshalJSON.
@@ -116,7 +133,7 @@ const providersKey = "providers"
 // which keys are special.
 func typedKey(k string) bool {
 	switch k {
-	case "env", compactionKey, providersKey:
+	case "env", compactionKey, providersKey, mcpServersKey:
 		return true
 	}
 	return false
@@ -159,6 +176,7 @@ func (s *Settings) UnmarshalJSON(data []byte) error {
 
 	s.Compaction = decodeCompaction(raw[compactionKey], s)
 	s.Providers = decodeProviders(raw[providersKey], s)
+	s.MCPServers = decodeMCPServers(raw[mcpServersKey], s)
 	return nil
 }
 
@@ -222,13 +240,18 @@ func decodeProviders(raw json.RawMessage, s *Settings) map[string]models.Provide
 // here, which is correct: it was only parked there to survive until this call.
 // The same applies to a "compaction" the typed field now carries — but only
 // then: a malformed section (typed nil, parked raw) must survive the write.
+//
+// mcpServers follows the same rule one level down: the map carries an
+// unparseable entry verbatim, so skipping the section when the typed field
+// holds anything also keeps that entry.
 func (s Settings) MarshalJSON() ([]byte, error) {
 	out := make(map[string]json.RawMessage, len(s.Extra)+3)
 	for k, v := range s.Extra {
 		// A parked raw copy is dropped once the typed field carries the
 		// section; a malformed one (typed zero, raw parked) survives.
 		if k == "env" || (k == compactionKey && s.Compaction != nil) ||
-			(k == providersKey && len(s.Providers) > 0) {
+			(k == providersKey && len(s.Providers) > 0) ||
+			(k == mcpServersKey && len(s.MCPServers) > 0) {
 			continue
 		}
 		out[k] = v
@@ -253,6 +276,13 @@ func (s Settings) MarshalJSON() ([]byte, error) {
 			return nil, err
 		}
 		out[providersKey] = providers
+	}
+	if len(s.MCPServers) > 0 {
+		mcpServers, err := json.Marshal(s.MCPServers)
+		if err != nil {
+			return nil, err
+		}
+		out[mcpServersKey] = mcpServers
 	}
 
 	// json.Marshal sorts map keys, which is what we want: the TypeScript
@@ -282,6 +312,13 @@ func (s Settings) Get(key string) (json.RawMessage, bool) {
 	}
 	if key == providersKey && len(s.Providers) > 0 {
 		b, err := json.Marshal(s.Providers)
+		if err != nil {
+			return nil, false
+		}
+		return b, true
+	}
+	if key == mcpServersKey && len(s.MCPServers) > 0 {
+		b, err := json.Marshal(s.MCPServers)
 		if err != nil {
 			return nil, false
 		}
@@ -354,6 +391,29 @@ func (s *Settings) Set(key string, raw json.RawMessage) {
 			return
 		}
 		s.Providers = p
+		return
+	}
+	if key == mcpServersKey {
+		// Same one-key-two-representations rule as the other two typed
+		// sections.
+		delete(s.Extra, mcpServersKey)
+		if len(raw) == 0 {
+			s.MCPServers = nil
+			return
+		}
+		var m map[string]MCPServerConfig
+		if err := json.Unmarshal(raw, &m); err != nil {
+			if s.Extra == nil {
+				s.Extra = make(map[string]json.RawMessage)
+			}
+			s.Extra[mcpServersKey] = raw
+			return
+		}
+		if len(m) == 0 {
+			s.MCPServers = nil
+			return
+		}
+		s.MCPServers = m
 		return
 	}
 	if len(raw) == 0 {

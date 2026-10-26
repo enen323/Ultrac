@@ -1,12 +1,17 @@
 package main
 
-// Tests for the provider section of `ultrac config`
-// (settings-unify-plan.md, superseding provider-config-plan.md P4).
+// Tests for the provider and MCP sections of `ultrac config`
+// (settings-unify-plan.md, superseding provider-config-plan.md P4;
+// docs/开发计划/新功能计划/mcp-plan.md P1).
 //
-// Three answers matter and each has a test: what the user layer declares (with
-// the key masked), which non-user layers were ignored and why, and the empty
-// case. The masked-key assertion is a security test, not a formatting one: an
-// unmasked key in a terminal or a pasted log is a leak.
+// Three provider answers matter and each has a test: what the user layer
+// declares (with the key masked), which non-user layers were ignored and why,
+// and the empty case. The masked-key assertion is a security test, not a
+// formatting one: an unmasked key in a terminal or a pasted log is a leak.
+//
+// The MCP section gets the same treatment: what the layers resolve to, which
+// layers declared it, and — the one answer available nowhere else — why a
+// declared server cannot be used.
 
 import (
 	"context"
@@ -174,5 +179,142 @@ func TestProviderConfigSectionReportsIgnoredEnvKeys(t *testing.T) {
 	// being dead does not make the provider dead.
 	if !strings.Contains(out, "custom:") {
 		t.Errorf("the declared provider is missing:\n%s", out)
+	}
+}
+
+func TestMCPConfigSectionShowsDeclaredServers(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("ULTRAC_CONFIG_DIR", home)
+
+	writeFile(t, filepath.Join(home, "settings.json"), `{
+      "mcpServers": {
+        "codegraph": {
+          "command": "C:/Users/ASUS/go/bin/codegraph.exe",
+          "args": ["mcp"],
+          "env": {"GITHUB_TOKEN": "ghp-supersecret"},
+          "startupTimeoutSeconds": 60,
+          "disabledTools": ["dangerous"]
+        }
+      }
+    }`)
+
+	var stdout strings.Builder
+	printMCPConfigSection(&stdout, settingsLayers(t, cwd))
+	out := stdout.String()
+
+	for _, want := range []string{
+		"mcp servers (settings.json):",
+		"codegraph [User]:",
+		"C:/Users/ASUS/go/bin/codegraph.exe mcp",
+		"startup=60s",
+		"disabled=dangerous",
+		"env=GITHUB_TOKEN=<set>",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	// The env value is the one place a token hides in an MCP entry, and the
+	// key name is all a user needs to see it is set (I6).
+	if strings.Contains(out, "ghp-supersecret") {
+		t.Errorf("an env value was printed:\n%s", out)
+	}
+	// An unstated timeout stays unstated: the engine's default is not the
+	// file's business.
+	if strings.Contains(out, "call=") {
+		t.Errorf("an unstated call timeout was reported:\n%s", out)
+	}
+}
+
+// A project file is allowed to declare a server (mcp-plan.md D1), so the
+// layers are named as provenance, not as a violation.
+func TestMCPConfigSectionNamesEveryDeclaringLayer(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("ULTRAC_CONFIG_DIR", home)
+
+	writeFile(t, filepath.Join(home, "settings.json"),
+		`{"mcpServers": {"fs": {"command": "npx"}}}`)
+	if err := os.MkdirAll(filepath.Join(cwd, ".ultrac"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cwd, ".ultrac", "settings.json"),
+		`{"mcpServers": {"fs": {"command": "C:/fs.exe"}, "repo": {"command": "repo.exe"}}}`)
+
+	var stdout strings.Builder
+	printMCPConfigSection(&stdout, settingsLayers(t, cwd))
+	out := stdout.String()
+
+	if !strings.Contains(out, "fs [User, Project]:") {
+		t.Errorf("the layers declaring fs are not named:\n%s", out)
+	}
+	if !strings.Contains(out, "repo [Project]:") {
+		t.Errorf("the project-only server is missing or unlabelled:\n%s", out)
+	}
+	// A project entry naming only a command replaces the user's whole
+	// entry: the spawn line is the project's, not a blend.
+	if !strings.Contains(out, "C:/fs.exe") {
+		t.Errorf("the merged spawn line is not the project layer's:\n%s", out)
+	}
+	if strings.Contains(out, "npx") {
+		t.Errorf("the replaced user entry leaked into the output:\n%s", out)
+	}
+}
+
+// "Why does my server not appear" is answered here and nowhere else: a server
+// that fails validation never reaches the engine, so nothing downstream can
+// name it.
+func TestMCPConfigSectionNamesWhyAServerIsUnusable(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("ULTRAC_CONFIG_DIR", home)
+
+	writeFile(t, filepath.Join(home, "settings.json"), `{
+      "mcpServers": {
+        "remote": {"command": "npx", "type": "http"},
+        "nocommand": {"args": ["-y", "server-fs"]},
+        "broken": {"command": "npx", "args": "not-an-array"},
+        "fine": {"command": "npx"}
+      }
+    }`)
+
+	var stdout strings.Builder
+	printMCPConfigSection(&stdout, settingsLayers(t, cwd))
+	out := stdout.String()
+
+	if !strings.Contains(out, "remote [User]: unusable:") {
+		t.Errorf("the unsupported transport is not reported:\n%s", out)
+	}
+	if !strings.Contains(out, "stdio only") {
+		t.Errorf("the refusal does not say what IS supported:\n%s", out)
+	}
+	if !strings.Contains(out, "nocommand [User]: unusable:") {
+		t.Errorf("the missing command is not reported:\n%s", out)
+	}
+	if !strings.Contains(out, "broken [User]: (entry does not parse; kept verbatim)") {
+		t.Errorf("the unparseable entry is not reported:\n%s", out)
+	}
+	// The failures are reported per server, but the other servers still
+	// load — a bad definition is never a reason to lose a good one.
+	if !strings.Contains(out, "fine [User]: npx") {
+		t.Errorf("the usable server is missing:\n%s", out)
+	}
+}
+
+func TestMCPConfigSectionEmpty(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("ULTRAC_CONFIG_DIR", home)
+
+	var stdout strings.Builder
+	printMCPConfigSection(&stdout, settingsLayers(t, cwd))
+	out := stdout.String()
+
+	if !strings.Contains(out, "mcp servers (settings.json):") {
+		t.Errorf("the section header is missing:\n%s", out)
+	}
+	if !strings.Contains(out, "(none declared)") {
+		t.Errorf("the empty case is not stated:\n%s", out)
 	}
 }
