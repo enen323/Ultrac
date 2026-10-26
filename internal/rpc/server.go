@@ -27,7 +27,7 @@
 // get_messages, get_last_assistant_text, set_session_name, get_entries,
 // get_commands, list_sessions, resume_session, compact,
 // set_auto_compaction, fork, clone, get_fork_messages, get_tree,
-// add_custom_model.
+// add_custom_model, get_mcp_status.
 //
 // list_sessions, resume_session and add_custom_model are Ultrac
 // extensions beyond pi's set (types.go explains why and what pi's
@@ -61,6 +61,7 @@ import (
 
 	"ultrac/internal/agent"
 	"ultrac/internal/ai"
+	"ultrac/internal/mcp"
 	"ultrac/internal/session"
 	"ultrac/internal/transport"
 )
@@ -174,6 +175,13 @@ type Host interface {
 	// "Cannot clone session: no current entry selected") or the extraction
 	// failing.
 	Clone() (string, error)
+
+	// MCPStatus lists every configured MCP server and where it is
+	// (mcp-plan.md D6). It is a pull, not a push: the boot strategy
+	// collapses the window in which a server's state can change, so there
+	// is nothing to notify a client about between two of its own reads
+	// (§3.7). An empty slice means no server is configured.
+	MCPStatus() []mcp.ServerStatus
 
 	// AddCustomModel persists a user-declared provider and reloads the
 	// catalog (custom-model-plan.md D3/D4): the credential goes to
@@ -374,6 +382,8 @@ func (s *Server) dispatch(cmd RpcCommand) (RpcResponse, func()) {
 		return s.cmdGetTree(cmd), nil
 	case CmdAddCustomModel:
 		return s.cmdAddCustomModel(cmd), nil
+	case CmdGetMCPStatus:
+		return s.cmdGetMCPStatus(cmd), nil
 	default:
 		// Unknown command: a clear error, never a crash (plan DoD). This is
 		// also where every pi command this port deliberately does not
@@ -791,6 +801,30 @@ func (s *Server) cmdAddCustomModel(cmd RpcCommand) RpcResponse {
 		return errorResponse(cmd.ID, CmdAddCustomModel, err.Error())
 	}
 	return successResponse(cmd.ID, CmdAddCustomModel, result)
+}
+
+// ---------------------------------------------------------------------------
+// MCP
+// ---------------------------------------------------------------------------
+
+// cmdGetMCPStatus answers the inventory of every configured MCP server.
+//
+// It is a straight delegation, and the shape is the host's: the four-state
+// vocabulary (cached / spawning / ready / failed) and the tool count are the
+// pool's, and a second copy here would be a third thing to keep in step with
+// the pool and `ultrac config`.
+//
+// The empty list is a successful answer, not an error: most machines have no
+// MCP servers configured, and a client polling on open must be able to render
+// "none" without a failure path.
+func (s *Server) cmdGetMCPStatus(cmd RpcCommand) RpcResponse {
+	servers := s.host.MCPStatus()
+	if servers == nil {
+		// Serialize as [] rather than null: a client should be able to
+		// iterate the answer without a nil check.
+		servers = []mcp.ServerStatus{}
+	}
+	return successResponse(cmd.ID, CmdGetMCPStatus, MCPStatusResult{Servers: servers})
 }
 
 // ValidateCustomModelSpec checks the fields that make the command

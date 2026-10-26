@@ -30,6 +30,7 @@ package rpc
 
 import (
 	"ultrac/internal/ai"
+	"ultrac/internal/mcp"
 	"ultrac/internal/session"
 )
 
@@ -231,6 +232,27 @@ type RpcSessionState struct {
 	AutoCompactionEnabled bool      `json:"autoCompactionEnabled"`
 	MessageCount          int       `json:"messageCount"`
 	PendingMessageCount   int       `json:"pendingMessageCount"`
+}
+
+// CmdGetMCPStatus is the desktop shell's MCP inventory
+// (docs/开发计划/新功能计划/mcp-plan.md D6).
+//
+// It is an Ultrac extension beyond pi's command set, added the same way
+// add_custom_model was: a new name, no existing command's shape touched.
+const CmdGetMCPStatus = "get_mcp_status"
+
+// MCPStatusResult is get_mcp_status's response data.
+//
+// The shape follows the plan's §3.7 table. It wraps the list rather than
+// returning it bare so a later field (a global gate, a warning) is additive
+// instead of a wire change.
+//
+// There is deliberately no per-server "tools" list in it: the tool names are
+// already in get_commands's world and in the prompt, and a second copy here
+// would be a second thing to keep in step. The COUNT is what a settings page
+// shows, and it is what tells a user the snapshot loaded.
+type MCPStatusResult struct {
+	Servers []mcp.ServerStatus `json:"servers"`
 }
 
 // CompactResult is the compact command's response data, and the payload

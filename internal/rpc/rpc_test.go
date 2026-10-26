@@ -33,6 +33,7 @@ import (
 	"ultrac/internal/agent"
 	"ultrac/internal/ai"
 	"ultrac/internal/config"
+	"ultrac/internal/mcp"
 	"ultrac/internal/session"
 	"ultrac/internal/transport"
 )
@@ -85,6 +86,13 @@ type testHost struct {
 	addErr      error
 	addCalls    []CustomModelSpec // spec as received, in order
 	addValidate func(CustomModelSpec) error
+
+	// mcpStatus backs the MCPStatus method: canned data for the
+	// protocol-shape tests, nil for the common case of a machine with no
+	// servers configured. The real pool is internal/mcp's, tested there
+	// against real subprocesses; what is under test here is the command's
+	// wire contract.
+	mcpStatus []mcp.ServerStatus
 }
 
 // AddCustomModel serves the canned result/error and records the spec it was
@@ -92,6 +100,15 @@ type testHost struct {
 // the command's default filling and field pass-through reached the host
 // verbatim. addValidate, when set, is consulted before the canned answer so
 // a test can pin exactly which specs are expected to reach the host.
+// MCPStatus returns the canned inventory, or nil for "no servers". The
+// empty-list-vs-null distinction is itself part of the wire contract, so the
+// test host models both.
+func (h *testHost) MCPStatus() []mcp.ServerStatus {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.mcpStatus
+}
+
 func (h *testHost) AddCustomModel(spec CustomModelSpec) (AddCustomModelResult, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -2398,6 +2415,152 @@ func TestPromptWithoutModelIsRefused(t *testing.T) {
 	}
 	if got := rpcResponseText(r); !strings.Contains(got, "No model configured") {
 		t.Errorf("error = %q, want it to say no model is configured", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// get_mcp_status (docs/开发计划/新功能计划/mcp-plan.md D6)
+// ---------------------------------------------------------------------------
+
+// TestGetMCPStatusShape — the wire shape a settings page renders. The four
+// fields it shows are the four a user asks about: what the server is called,
+// how it is reached, whether it is up, and how many tools it brought.
+func TestGetMCPStatusShape(t *testing.T) {
+	h := newTestHost(t)
+	h.mcpStatus = []mcp.ServerStatus{
+		{
+			Name:         "codegraph",
+			Transport:    "stdio",
+			State:        mcp.StateReady,
+			Tools:        12,
+			Instructions: "a code graph for this repository",
+		},
+		{
+			Name:      "filesystem",
+			Transport: "stdio",
+			State:     mcp.StateCached,
+			Tools:     14,
+		},
+		{
+			Name:  "broken",
+			State: mcp.StateFailed,
+			Error: "command not found on PATH",
+		},
+	}
+
+	lines := h.serve(t, cmd("get_mcp_status", nil))
+	r := response(t, lines, "get_mcp_status")
+	if r["success"] != true {
+		t.Fatalf("get_mcp_status = %v", r)
+	}
+	d := dataMap(t, r)
+	servers, ok := d["servers"].([]any)
+	if !ok {
+		t.Fatalf("data.servers = %v, want an array", d["servers"])
+	}
+	if len(servers) != 3 {
+		t.Fatalf("servers = %d, want 3", len(servers))
+	}
+
+	first, _ := servers[0].(map[string]any)
+	for k, want := range map[string]any{
+		"name":         "codegraph",
+		"transport":    "stdio",
+		"state":        "ready",
+		"tools":        float64(12),
+		"instructions": "a code graph for this repository",
+	} {
+		if first[k] != want {
+			t.Errorf("servers[0][%q] = %v, want %v", k, first[k], want)
+		}
+	}
+	// An absent error is omitted, not emitted as "": a client renders the
+	// field's presence, and an empty string is not a signal.
+	if _, present := first["error"]; present {
+		t.Errorf("servers[0].error is present for a healthy server: %v", first["error"])
+	}
+
+	third, _ := servers[2].(map[string]any)
+	if third["state"] != "failed" {
+		t.Errorf("servers[2].state = %v, want failed", third["state"])
+	}
+	if third["error"] != "command not found on PATH" {
+		t.Errorf("servers[2].error = %v", third["error"])
+	}
+	// A failed server reports 0 tools rather than the count it used to
+	// have: the two facts are separate and the status says both.
+	if third["tools"] != float64(0) {
+		t.Errorf("servers[2].tools = %v, want 0", third["tools"])
+	}
+
+	// It is a response, not an event: nothing else went out on the wire.
+	if len(lines) != 1 {
+		t.Errorf("lines = %d, want exactly one response and no events", len(lines))
+	}
+}
+
+// A machine with no MCP servers configured is the common case, and the answer
+// must be an empty list rather than null — a client renders it by iterating,
+// and null is a nil check it should not have to make.
+func TestGetMCPStatusWithNoServersIsAnEmptyList(t *testing.T) {
+	h := newTestHost(t)
+
+	r := response(t, h.serve(t, cmd("get_mcp_status", nil)), "get_mcp_status")
+	if r["success"] != true {
+		t.Fatalf("get_mcp_status = %v", r)
+	}
+	d := dataMap(t, r)
+	servers, ok := d["servers"].([]any)
+	if !ok {
+		t.Fatalf("data.servers = %v, want an array, not null", d["servers"])
+	}
+	if len(servers) != 0 {
+		t.Errorf("servers = %v, want empty", servers)
+	}
+}
+
+// The state vocabulary is the point of the command: "configured but never
+// contacted" and "tried and broken" are different things to a user, and a
+// client renders them differently.
+func TestGetMCPStatusReportsEveryState(t *testing.T) {
+	for _, state := range []mcp.State{
+		mcp.StateCached, mcp.StateSpawning, mcp.StateReady, mcp.StateFailed,
+	} {
+		h := newTestHost(t)
+		h.mcpStatus = []mcp.ServerStatus{{Name: "fs", Transport: "stdio", State: state, Tools: 1}}
+
+		r := response(t, h.serve(t, cmd("get_mcp_status", nil)), "get_mcp_status")
+		d := dataMap(t, r)
+		servers, _ := d["servers"].([]any)
+		if len(servers) != 1 {
+			t.Fatalf("%s: servers = %v", state, d["servers"])
+		}
+		got, _ := servers[0].(map[string]any)
+		if got["state"] != string(state) {
+			t.Errorf("state = %v, want %s", got["state"], state)
+		}
+	}
+}
+
+// A server logging to stdout is a common misconfiguration, and the count is
+// the only thing that makes it diagnosable. It is omitted when zero so a
+// healthy server's line stays clean.
+func TestGetMCPStatusReportsMalformedLines(t *testing.T) {
+	h := newTestHost(t)
+	h.mcpStatus = []mcp.ServerStatus{
+		{Name: "noisy", Transport: "stdio", State: mcp.StateReady, Tools: 3, MalformedLines: 7},
+		{Name: "quiet", Transport: "stdio", State: mcp.StateReady, Tools: 3},
+	}
+
+	r := response(t, h.serve(t, cmd("get_mcp_status", nil)), "get_mcp_status")
+	servers, _ := dataMap(t, r)["servers"].([]any)
+	noisy, _ := servers[0].(map[string]any)
+	if noisy["malformedLines"] != float64(7) {
+		t.Errorf("malformedLines = %v, want 7", noisy["malformedLines"])
+	}
+	quiet, _ := servers[1].(map[string]any)
+	if _, present := quiet["malformedLines"]; present {
+		t.Errorf("malformedLines is present for a clean server: %v", quiet["malformedLines"])
 	}
 }
 
